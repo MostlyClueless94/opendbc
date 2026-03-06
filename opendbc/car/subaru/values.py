@@ -208,7 +208,7 @@ class CAR(Platforms):
     flags=SubaruFlags.LKAS_ANGLE,
   )
   SUBARU_OUTBACK_2023 = SubaruGen2PlatformConfig(
-    [SubaruCarDocs("Subaru Outback 2023", "All", car_parts=CarParts.common([CarHarness.subaru_d]))],
+    [SubaruCarDocs("Subaru Outback 2023-25", "All", car_parts=CarParts.common([CarHarness.subaru_d]))],
     SUBARU_OUTBACK.specs,
     flags=SubaruFlags.LKAS_ANGLE,
   )

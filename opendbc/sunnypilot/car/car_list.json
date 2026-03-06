@@ -2898,6 +2898,16 @@
     ],
     "package": "All"
   },
+  "Subaru Ascent 2023": {
+    "platform": "SUBARU_ASCENT_2023",
+    "make": "Subaru",
+    "brand": "subaru",
+    "model": "Ascent",
+    "year": [
+      "2023"
+    ],
+    "package": "All"
+  },
   "Subaru Crosstrek 2018-19": {
     "platform": "SUBARU_IMPREZA",
     "make": "Subaru",
@@ -2921,6 +2931,16 @@
       "2023"
     ],
     "package": "EyeSight Driver Assistance"
+  },
+  "Subaru Crosstrek 2025": {
+    "platform": "SUBARU_CROSSTREK_2025",
+    "make": "Subaru",
+    "brand": "subaru",
+    "model": "Crosstrek",
+    "year": [
+      "2025"
+    ],
+    "package": "All"
   },
   "Subaru Forester 2017-18": {
     "platform": "SUBARU_FORESTER_PREGLOBAL",
@@ -3026,6 +3046,18 @@
       "2020",
       "2021",
       "2022"
+    ],
+    "package": "All"
+  },
+  "Subaru Outback 2023-25": {
+    "platform": "SUBARU_OUTBACK_2023",
+    "make": "Subaru",
+    "brand": "subaru",
+    "model": "Outback",
+    "year": [
+      "2023",
+      "2024",
+      "2025"
     ],
     "package": "All"
   },
