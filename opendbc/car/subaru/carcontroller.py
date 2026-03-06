@@ -28,7 +28,10 @@ class CarController(CarControllerBase, SnGCarController):
     self.packer = CANPacker(DBC[CP.carFingerprint][Bus.pt])
 
   def handle_angle_lateral(self, CC, CS):
-    lkas_request = CC.latActive and CC.enabled and \
+    # Angle-LKAS can hard fault during low-speed MADS lateral-only maneuvers.
+    # Keep MADS behavior at road speeds, but require full controls at parking-lot speeds.
+    mads_speed_ok = CC.enabled or CS.out.vEgoRaw > 7.0
+    lkas_request = CC.latActive and mads_speed_ok and \
       CS.out.gearShifter == structs.CarState.GearShifter.drive and not CS.out.standstill
 
     apply_steer = apply_std_steer_angle_limits(
