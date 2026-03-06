@@ -1,6 +1,6 @@
 import numpy as np
 from opendbc.can import CANPacker
-from opendbc.car import Bus, make_tester_present_msg
+from opendbc.car import Bus, make_tester_present_msg, structs
 from opendbc.car.lateral import apply_driver_steer_torque_limits, apply_std_steer_angle_limits, common_fault_avoidance
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.subaru import subarucan
@@ -28,20 +28,23 @@ class CarController(CarControllerBase, SnGCarController):
     self.packer = CANPacker(DBC[CP.carFingerprint][Bus.pt])
 
   def handle_angle_lateral(self, CC, CS):
+    lkas_request = CC.latActive and CC.enabled and \
+      CS.out.gearShifter == structs.CarState.GearShifter.drive and not CS.out.standstill
+
     apply_steer = apply_std_steer_angle_limits(
       CC.actuators.steeringAngleDeg,
       self.apply_angle_last,
       CS.out.vEgoRaw,
       CS.out.steeringAngleDeg,
-      CC.latActive,
+      lkas_request,
       self.p.ANGLE_LIMITS,
     )
 
-    if not CC.latActive:
+    if not lkas_request:
       apply_steer = CS.out.steeringAngleDeg
 
     self.apply_angle_last = apply_steer
-    return subarucan.create_steering_control_angle(self.packer, apply_steer, CC.latActive)
+    return subarucan.create_steering_control_angle(self.packer, apply_steer, lkas_request)
 
   def handle_torque_lateral(self, CC, CS):
     apply_torque = int(round(CC.actuators.torque * self.p.STEER_MAX))
