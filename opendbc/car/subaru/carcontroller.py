@@ -14,6 +14,9 @@ MAX_STEER_RATE = 25  # deg/s
 MAX_STEER_RATE_FRAMES = 7  # tx control frames needed before torque can be cut
 MADS_ONLY_MIN_SPEED = 2.24  # m/s (5 mph)
 MADS_ONLY_MAX_STEER_ANGLE = 120.0  # deg
+LOW_SPEED_SMOOTH_MAX_SPEED = 4.4704  # m/s (10 mph)
+LOW_SPEED_SMOOTH_DEADBAND_MAX = 0.8  # deg at 0 mph
+LOW_SPEED_SMOOTH_ALPHA_MIN = 0.35  # blend factor at 0 mph
 LOW_SPEED_HIGH_ANGLE_GUARD_MAX_SPEED = 2.7  # m/s (6 mph)
 LOW_SPEED_HIGH_ANGLE_GUARD_MAX_STEER_ANGLE = 135.0  # deg
 POST_NON_DRIVE_COOLDOWN_MAX_SPEED = 4.4704  # m/s (10 mph)
@@ -34,6 +37,17 @@ class CarController(CarControllerBase, SnGCarController):
     self.p = CarControllerParams(CP)
     self.packer = CANPacker(DBC[CP.carFingerprint][Bus.pt])
 
+  def _get_low_speed_smoothed_angle_target(self, raw_target, v_ego):
+    speed_factor = np.clip(v_ego / LOW_SPEED_SMOOTH_MAX_SPEED, 0.0, 1.0)
+    deadband = (1.0 - speed_factor) * LOW_SPEED_SMOOTH_DEADBAND_MAX
+    delta = raw_target - self.apply_angle_last
+
+    if abs(delta) <= deadband:
+      return self.apply_angle_last
+
+    delta = delta - deadband if delta > 0 else delta + deadband
+    alpha = np.interp(v_ego, [0.0, LOW_SPEED_SMOOTH_MAX_SPEED], [LOW_SPEED_SMOOTH_ALPHA_MIN, 1.0])
+    return self.apply_angle_last + alpha * delta
   def handle_angle_lateral(self, CC, CS):
     # Angle-LKAS can hard fault during low-speed MADS lateral-only maneuvers.
     # Keep MADS behavior above 5 mph, but block sharp parking-lot style steering in lateral-only mode.
@@ -50,8 +64,13 @@ class CarController(CarControllerBase, SnGCarController):
     lkas_request = CC.latActive and (CC.enabled or not mads_only or mads_only_ok) and in_drive and \
       not CS.out.standstill and not low_speed_high_angle_guard and not post_non_drive_cooldown_guard
 
+    steer_target = CC.actuators.steeringAngleDeg
+    if lkas_request and CS.out.vEgoRaw < LOW_SPEED_SMOOTH_MAX_SPEED:
+      # Low-speed damping to reduce left-right command chatter while retaining large steering authority.
+      steer_target = self._get_low_speed_smoothed_angle_target(steer_target, CS.out.vEgoRaw)
+
     apply_steer = apply_std_steer_angle_limits(
-      CC.actuators.steeringAngleDeg,
+      steer_target,
       self.apply_angle_last,
       CS.out.vEgoRaw,
       CS.out.steeringAngleDeg,
