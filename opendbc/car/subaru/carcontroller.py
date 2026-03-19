@@ -18,6 +18,9 @@ MADS_MANUAL_OVERRIDE_RELEASE_FRAMES = 30  # 0.3 s at 100 Hz
 LOW_SPEED_SMOOTH_MAX_SPEED = 4.4704  # m/s (10 mph)
 LOW_SPEED_SMOOTH_DEADBAND_MAX = 0.8  # deg at 0 mph
 LOW_SPEED_SMOOTH_ALPHA_MIN = 0.35  # blend factor at 0 mph
+SOFT_CAPTURE_DURATION_FRAMES = 40  # 0.4 s at 100 Hz
+SOFT_CAPTURE_SPEED_BP = [0.0, LOW_SPEED_SMOOTH_MAX_SPEED, 15.6464]  # 0, 10, 35 mph
+SOFT_CAPTURE_INITIAL_BLEND_V = [0.20, 0.25, 0.40]
 LOW_SPEED_HIGH_ANGLE_GUARD_MAX_SPEED = 2.7  # m/s (6 mph)
 LOW_SPEED_HIGH_ANGLE_GUARD_MAX_STEER_ANGLE = 135.0  # deg
 POST_NON_DRIVE_COOLDOWN_MAX_SPEED = 4.4704  # m/s (10 mph)
@@ -35,6 +38,10 @@ class CarController(CarControllerBase, SnGCarController):
     self.steer_rate_counter = 0
     self.last_non_drive_frame = -POST_NON_DRIVE_COOLDOWN_FRAMES
     self.last_mads_manual_override_frame = -MADS_MANUAL_OVERRIDE_RELEASE_FRAMES
+    self.prev_lat_active = False
+    self.prev_mads_manual_override = False
+    self.prev_lkas_request = False
+    self.soft_capture_start_frame = -SOFT_CAPTURE_DURATION_FRAMES
 
     self.p = CarControllerParams(CP)
     self.packer = CANPacker(DBC[CP.carFingerprint][Bus.pt])
@@ -50,6 +57,12 @@ class CarController(CarControllerBase, SnGCarController):
     delta = delta - deadband if delta > 0 else delta + deadband
     alpha = np.interp(v_ego, [0.0, LOW_SPEED_SMOOTH_MAX_SPEED], [LOW_SPEED_SMOOTH_ALPHA_MIN, 1.0])
     return self.apply_angle_last + alpha * delta
+
+  def _get_soft_capture_blended_angle_target(self, raw_target, steering_angle, v_ego):
+    initial_blend = np.interp(v_ego, SOFT_CAPTURE_SPEED_BP, SOFT_CAPTURE_INITIAL_BLEND_V)
+    frames_since_capture = self.frame - self.soft_capture_start_frame
+    blend = np.interp(frames_since_capture, [0, SOFT_CAPTURE_DURATION_FRAMES], [initial_blend, 1.0])
+    return steering_angle + blend * (raw_target - steering_angle)
 
   def handle_angle_lateral(self, CC, CS):
     # Angle-LKAS can hard fault during low-speed MADS lateral-only maneuvers.
@@ -74,11 +87,19 @@ class CarController(CarControllerBase, SnGCarController):
     lkas_request = CC.latActive and (CC.enabled or not mads_only or mads_only_ok) and in_drive and \
       not CS.out.standstill and not low_speed_high_angle_guard and not post_non_drive_cooldown_guard and \
       not mads_manual_override
+    lat_active_just_enabled = CC.latActive and not self.prev_lat_active
+    mads_manual_override_just_ended = self.prev_mads_manual_override and not mads_manual_override
+    lkas_request_just_enabled = lkas_request and not self.prev_lkas_request
+
+    if lkas_request_just_enabled and (lat_active_just_enabled or mads_manual_override_just_ended):
+      self.soft_capture_start_frame = self.frame
 
     steer_target = CC.actuators.steeringAngleDeg
     if lkas_request and CS.out.vEgoRaw < LOW_SPEED_SMOOTH_MAX_SPEED:
       # Low-speed damping to reduce left-right command chatter while retaining large steering authority.
       steer_target = self._get_low_speed_smoothed_angle_target(steer_target, CS.out.vEgoRaw)
+    if lkas_request and (self.frame - self.soft_capture_start_frame) < SOFT_CAPTURE_DURATION_FRAMES:
+      steer_target = self._get_soft_capture_blended_angle_target(steer_target, CS.out.steeringAngleDeg, CS.out.vEgoRaw)
 
     apply_steer = apply_std_steer_angle_limits(
       steer_target,
@@ -92,6 +113,9 @@ class CarController(CarControllerBase, SnGCarController):
     if not lkas_request:
       apply_steer = CS.out.steeringAngleDeg
 
+    self.prev_lat_active = CC.latActive
+    self.prev_mads_manual_override = mads_manual_override
+    self.prev_lkas_request = lkas_request
     self.apply_angle_last = apply_steer
     return subarucan.create_steering_control_angle(self.packer, apply_steer, lkas_request)
 
