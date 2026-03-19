@@ -1,10 +1,11 @@
 import numpy as np
 from opendbc.can import CANPacker
 from opendbc.car import Bus, make_tester_present_msg, structs
-from opendbc.car.lateral import apply_driver_steer_torque_limits, apply_std_steer_angle_limits, common_fault_avoidance
+from opendbc.car.lateral import apply_driver_steer_torque_limits, apply_std_steer_angle_limits, common_fault_avoidance, get_max_angle_delta_vm
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.subaru import subarucan
 from opendbc.car.subaru.values import DBC, GLOBAL_ES_ADDR, CanBus, CarControllerParams, SubaruFlags
+from opendbc.car.vehicle_model import VehicleModel
 
 from opendbc.sunnypilot.car.subaru.stop_and_go import SnGCarController
 
@@ -44,6 +45,7 @@ class CarController(CarControllerBase, SnGCarController):
     self.soft_capture_start_frame = -SOFT_CAPTURE_DURATION_FRAMES
 
     self.p = CarControllerParams(CP)
+    self.VM = VehicleModel(CP)
     self.packer = CANPacker(DBC[CP.carFingerprint][Bus.pt])
 
   def _get_low_speed_smoothed_angle_target(self, raw_target, v_ego):
@@ -84,9 +86,16 @@ class CarController(CarControllerBase, SnGCarController):
       abs(CS.out.steeringAngleDeg) > LOW_SPEED_HIGH_ANGLE_GUARD_MAX_STEER_ANGLE
     post_non_drive_cooldown_guard = CS.out.vEgoRaw < POST_NON_DRIVE_COOLDOWN_MAX_SPEED and \
       (self.frame - self.last_non_drive_frame) < POST_NON_DRIVE_COOLDOWN_FRAMES
-    lkas_request = CC.latActive and (CC.enabled or not mads_only or mads_only_ok) and in_drive and \
+    lkas_request_candidate = CC.latActive and (CC.enabled or not mads_only or mads_only_ok) and in_drive and \
       not CS.out.standstill and not low_speed_high_angle_guard and not post_non_drive_cooldown_guard and \
       not mads_manual_override
+    engage_gap_blocked = False
+    if lkas_request_candidate:
+      max_angle_delta = get_max_angle_delta_vm(max(CS.out.vEgoRaw, 1.0), self.VM, self.p)
+      steering_gap = abs(CS.out.steeringAngleDeg - self.apply_angle_last)
+      engage_gap_blocked = steering_gap > max_angle_delta
+
+    lkas_request = lkas_request_candidate and not engage_gap_blocked
     lat_active_just_enabled = CC.latActive and not self.prev_lat_active
     mads_manual_override_just_ended = self.prev_mads_manual_override and not mads_manual_override
     lkas_request_just_enabled = lkas_request and not self.prev_lkas_request
@@ -94,24 +103,24 @@ class CarController(CarControllerBase, SnGCarController):
     if lkas_request_just_enabled and (lat_active_just_enabled or mads_manual_override_just_ended):
       self.soft_capture_start_frame = self.frame
 
-    steer_target = CC.actuators.steeringAngleDeg
-    if lkas_request and CS.out.vEgoRaw < LOW_SPEED_SMOOTH_MAX_SPEED:
-      # Low-speed damping to reduce left-right command chatter while retaining large steering authority.
-      steer_target = self._get_low_speed_smoothed_angle_target(steer_target, CS.out.vEgoRaw)
-    if lkas_request and (self.frame - self.soft_capture_start_frame) < SOFT_CAPTURE_DURATION_FRAMES:
-      steer_target = self._get_soft_capture_blended_angle_target(steer_target, CS.out.steeringAngleDeg, CS.out.vEgoRaw)
-
-    apply_steer = apply_std_steer_angle_limits(
-      steer_target,
-      self.apply_angle_last,
-      CS.out.vEgoRaw,
-      CS.out.steeringAngleDeg,
-      lkas_request,
-      self.p.ANGLE_LIMITS,
-    )
-
     if not lkas_request:
       apply_steer = CS.out.steeringAngleDeg
+    else:
+      steer_target = CC.actuators.steeringAngleDeg
+      if CS.out.vEgoRaw < LOW_SPEED_SMOOTH_MAX_SPEED:
+        # Low-speed damping to reduce left-right command chatter while retaining large steering authority.
+        steer_target = self._get_low_speed_smoothed_angle_target(steer_target, CS.out.vEgoRaw)
+      if (self.frame - self.soft_capture_start_frame) < SOFT_CAPTURE_DURATION_FRAMES:
+        steer_target = self._get_soft_capture_blended_angle_target(steer_target, CS.out.steeringAngleDeg, CS.out.vEgoRaw)
+
+      apply_steer = apply_std_steer_angle_limits(
+        steer_target,
+        self.apply_angle_last,
+        CS.out.vEgoRaw,
+        CS.out.steeringAngleDeg,
+        True,
+        self.p.ANGLE_LIMITS,
+      )
 
     self.prev_lat_active = CC.latActive
     self.prev_mads_manual_override = mads_manual_override
