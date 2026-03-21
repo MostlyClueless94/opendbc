@@ -22,9 +22,6 @@ class CarControllerParams:
       545,
       ([0., 5., 35.], [5., .8, .15]),
       ([0., 5., 35.], [5., .8, .15]),
-      MAX_LATERAL_ACCEL=3.5886,
-      MAX_LATERAL_JERK=6.0,
-      MAX_ANGLE_RATE=5.0,
     )
 
     if CP.flags & SubaruFlags.GLOBAL_GEN2:
