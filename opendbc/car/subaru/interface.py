@@ -90,8 +90,9 @@ class CarInterface(CarInterfaceBase):
     else:
       raise ValueError(f"unknown car: {candidate}")
 
-    ret.alphaLongitudinalAvailable = not (ret.flags & (SubaruFlags.GLOBAL_GEN2 | SubaruFlags.PREGLOBAL |
-                                                       SubaruFlags.LKAS_ANGLE | SubaruFlags.HYBRID))
+    # Newer Subaru OP-long bring-up stays on a strict allowlist until the angle-LKAS
+    # platforms are validated with route data and in-car testing.
+    ret.alphaLongitudinalAvailable = candidate == CAR.SUBARU_OUTBACK_2023
     ret.openpilotLongitudinalControl = alpha_long and ret.alphaLongitudinalAvailable
 
     if ret.flags & SubaruFlags.GLOBAL_GEN2 and ret.openpilotLongitudinalControl:
