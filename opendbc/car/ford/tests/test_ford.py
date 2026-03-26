@@ -5,6 +5,7 @@ from hypothesis import settings, given, strategies as st
 
 from opendbc.car.structs import CarParams
 from opendbc.car.fw_versions import build_fw_dict
+from opendbc.car.ford.interface import CarInterface
 from opendbc.car.ford.values import CAR, FW_QUERY_CONFIG, FW_PATTERN, get_platform_codes
 from opendbc.car.ford.fingerprints import FW_VERSIONS
 from opendbc.testing import parameterized
@@ -41,6 +42,12 @@ ECU_PART_NUMBER = {
 
 
 class TestFordFW(unittest.TestCase):
+  def test_f150_specs(self):
+    CP = CarInterface.get_non_essential_params(CAR.FORD_F_150_MK14)
+    assert CP.mass == 3334
+    assert CP.wheelbase == 3.99
+    assert CP.steerActuatorDelay == 0.22
+
   def test_fw_query_config(self):
     for (ecu, addr, subaddr) in FW_QUERY_CONFIG.extra_ecus:
       assert ecu in ECU_ADDRESSES, "Unknown ECU"

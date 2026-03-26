@@ -80,6 +80,9 @@ class TestFordSafetyBase(common.CarSafetyTest):
   MAX_CURVATURE = 0.02
   MAX_CURVATURE_ERROR = 0.002
   CURVATURE_ERROR_MIN_SPEED = 10.0  # m/s
+  MAX_PATH_OFFSET = 1.0
+  MAX_PATH_ANGLE = 0.25
+  MAX_CURVATURE_RATE = 0.001023
 
   ANGLE_RATE_BP = [5., 25., 25.]
   ANGLE_RATE_UP = [0.00045, 0.0001, 0.0001]  # windup limit
@@ -259,37 +262,58 @@ class TestFordSafetyBase(common.CarSafetyTest):
           self.assertEqual(should_tx, self._tx(self._lat_ctl_msg(True, 0, 0, curvature, 0)))
 
   def test_steer_allowed(self):
-    path_offsets = np.arange(-5.12, 5.11, 2.5).round()
-    path_angles = np.arange(-0.5, 0.5235, 0.25).round(1)
-    curvature_rates = np.arange(-0.001024, 0.00102375, 0.001).round(3)
-    curvatures = np.arange(-0.02, 0.02094, 0.01).round(2)
+    safe_signals = [
+      (0.0, 0.0, 0.0, 0.0),
+      (0.005, 0.001, 0.00005, 0.001),
+      (-0.005, -0.001, -0.00005, -0.001),
+    ]
 
-    for speed in (self.CURVATURE_ERROR_MIN_SPEED - 1,
-                  self.CURVATURE_ERROR_MIN_SPEED + 1):
+    for speed in (self.CURVATURE_ERROR_MIN_SPEED - 1, self.CURVATURE_ERROR_MIN_SPEED + 1):
       _, curvature_accel_limit_upper = self.get_canfd_curvature_limits(speed)
       for controls_allowed in (True, False):
         for steer_control_enabled in (True, False):
-          for path_offset in path_offsets:
-            for path_angle in path_angles:
-              for curvature_rate in curvature_rates:
-                for curvature in curvatures:
-                  self.safety.set_controls_allowed(controls_allowed)
-                  self._set_prev_desired_angle(curvature)
-                  self._reset_curvature_measurement(curvature, speed)
+          for path_offset, path_angle, curvature_rate, curvature in safe_signals:
+            self.safety.init_tests()
+            self.safety.set_controls_allowed(controls_allowed)
+            self._set_prev_desired_angle(curvature)
+            self._reset_curvature_measurement(curvature, speed)
 
-                  should_tx = path_offset == 0 and path_angle == 0 and curvature_rate == 0
-                  # when request bit is 0, only allow curvature of 0 since the signal range
-                  # is not large enough to enforce it tracking measured
-                  should_tx = should_tx and (controls_allowed if steer_control_enabled else curvature == 0)
+            should_tx = controls_allowed and steer_control_enabled
+            if not steer_control_enabled:
+              should_tx = should_tx or (path_offset == 0.0 and path_angle == 0.0 and curvature_rate == 0.0 and curvature == 0.0)
 
-                  # Only CAN FD has the max lateral acceleration limit
-                  if self.STEER_MESSAGE == MSG_LateralMotionControl2:
-                    should_tx = should_tx and abs(curvature) <= curvature_accel_limit_upper
+            if self.STEER_MESSAGE == MSG_LateralMotionControl2 and should_tx:
+              should_tx = abs(curvature) <= curvature_accel_limit_upper
 
-                  with self.subTest(controls_allowed=controls_allowed, steer_control_enabled=steer_control_enabled,
-                                    path_offset=float(path_offset), path_angle=float(path_angle), curvature_rate=float(curvature_rate),
-                                    curvature=float(curvature)):
-                    self.assertEqual(should_tx, self._tx(self._lat_ctl_msg(steer_control_enabled, path_offset, path_angle, curvature, curvature_rate)))
+            with self.subTest(controls_allowed=controls_allowed, steer_control_enabled=steer_control_enabled,
+                              path_offset=path_offset, path_angle=path_angle,
+                              curvature_rate=curvature_rate, curvature=curvature):
+              self.assertEqual(should_tx, self._tx(self._lat_ctl_msg(steer_control_enabled, path_offset, path_angle, curvature, curvature_rate)))
+
+  def test_path_signal_limits(self):
+    self.safety.set_controls_allowed(True)
+    self._set_prev_desired_angle(0.0)
+    self._reset_curvature_measurement(0.0, self.CURVATURE_ERROR_MIN_SPEED + 1)
+
+    valid_msg = self._lat_ctl_msg(True, 0.005, 0.001, 0.0, 0.00005)
+    self.assertTrue(self._tx(valid_msg))
+
+    over_path_offset = self._lat_ctl_msg(True, self.MAX_PATH_OFFSET + 0.1, 0.0, 0.0, 0.0)
+    self.assertFalse(self._tx(over_path_offset))
+
+    self.safety.init_tests()
+    self.safety.set_controls_allowed(True)
+    self._set_prev_desired_angle(0.0)
+    self._reset_curvature_measurement(0.0, self.CURVATURE_ERROR_MIN_SPEED + 1)
+    over_path_angle = self._lat_ctl_msg(True, 0.0, self.MAX_PATH_ANGLE + 0.01, 0.0, 0.0)
+    self.assertFalse(self._tx(over_path_angle))
+
+    self.safety.init_tests()
+    self.safety.set_controls_allowed(True)
+    self._set_prev_desired_angle(0.0)
+    self._reset_curvature_measurement(0.0, self.CURVATURE_ERROR_MIN_SPEED + 1)
+    over_curvature_rate = self._lat_ctl_msg(True, 0.0, 0.0, 0.0, self.MAX_CURVATURE_RATE + 0.0001)
+    self.assertFalse(self._tx(over_curvature_rate))
 
   def test_curvature_rate_limits(self):
     """
