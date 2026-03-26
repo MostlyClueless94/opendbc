@@ -45,6 +45,13 @@ class TestSubaruCarController(unittest.TestCase):
     self.assertEqual(msg, expected)
     self.assertAlmostEqual(controller.apply_angle_last, cs.out.steeringAngleDeg)
 
+  def test_crosstrek_2025_params_construct(self):
+    CP = CarInterface.get_non_essential_params(CAR.SUBARU_CROSSTREK_2025)
+    _ = CarInterface.get_non_essential_params_sp(CP, CAR.SUBARU_CROSSTREK_2025)
+
+    self.assertEqual(CP.carFingerprint, CAR.SUBARU_CROSSTREK_2025)
+    self.assertGreater(CP.maxLateralAccel, 0.0)
+
 
 if __name__ == "__main__":
   unittest.main()
