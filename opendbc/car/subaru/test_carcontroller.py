@@ -7,6 +7,13 @@ from opendbc.car.subaru.carcontroller import CarController
 from opendbc.car.subaru.interface import CarInterface
 from opendbc.car.subaru.values import CAR
 
+NEWER_SUBARU_ANGLE_LKAS_CARS = (
+  CAR.SUBARU_FORESTER_2022,
+  CAR.SUBARU_OUTBACK_2023,
+  CAR.SUBARU_ASCENT_2023,
+  CAR.SUBARU_CROSSTREK_2025,
+)
+
 
 class TestSubaruCarController(unittest.TestCase):
   @staticmethod
@@ -44,6 +51,15 @@ class TestSubaruCarController(unittest.TestCase):
 
     self.assertEqual(msg, expected)
     self.assertAlmostEqual(controller.apply_angle_last, cs.out.steeringAngleDeg)
+
+  def test_newer_angle_lkas_params_construct(self):
+    for car_model in NEWER_SUBARU_ANGLE_LKAS_CARS:
+      with self.subTest(car_model=car_model):
+        CP = CarInterface.get_non_essential_params(car_model)
+        _ = CarInterface.get_non_essential_params_sp(CP, car_model)
+
+        self.assertEqual(CP.carFingerprint, car_model)
+        self.assertGreater(CP.maxLateralAccel, 0.0)
 
   def test_crosstrek_2025_params_construct(self):
     CP = CarInterface.get_non_essential_params(CAR.SUBARU_CROSSTREK_2025)
