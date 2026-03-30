@@ -17,6 +17,13 @@ MADS_MANUAL_OVERRIDE_RELEASE_FRAMES = 30  # 0.3 s at 100 Hz
 LOW_SPEED_SMOOTH_MAX_SPEED = 4.4704  # m/s (10 mph)
 LOW_SPEED_SMOOTH_DEADBAND_MAX = 0.8  # deg at 0 mph
 LOW_SPEED_SMOOTH_ALPHA_MIN = 0.35  # blend factor at 0 mph
+LOW_SPEED_STRAIGHT_STABILITY_TARGET_MAX = 3.5  # deg, keep narrowly scoped to straight-ahead chatter
+LOW_SPEED_STRAIGHT_STABILITY_STEER_MAX = 6.0  # deg, bypass real turning maneuvers
+LOW_SPEED_STRAIGHT_CENTER_HOLD_TARGET_MAX = 1.0  # deg, hold near-center targets steady
+LOW_SPEED_STRAIGHT_CENTER_HOLD_STEER_MAX = 2.5  # deg, measured wheel angle window for center hold
+LOW_SPEED_STRAIGHT_SIGN_RELEASE_TARGET = 2.0  # deg, allow small opposite-sign moves only after persistence
+LOW_SPEED_STRAIGHT_SIGN_RELEASE_FRAMES = 5  # 50 ms at 100 Hz
+LOW_SPEED_STRAIGHT_SIGN_EPSILON = 0.05  # deg, ignore numerical noise around zero
 LOW_SPEED_HIGH_ANGLE_GUARD_MAX_SPEED = 2.7  # m/s (6 mph)
 LOW_SPEED_HIGH_ANGLE_GUARD_MAX_STEER_ANGLE = 135.0  # deg
 POST_NON_DRIVE_COOLDOWN_MAX_SPEED = 4.4704  # m/s (10 mph)
@@ -34,6 +41,8 @@ class CarController(CarControllerBase, SnGCarController):
     self.steer_rate_counter = 0
     self.last_non_drive_frame = -POST_NON_DRIVE_COOLDOWN_FRAMES
     self.last_mads_manual_override_frame = -MADS_MANUAL_OVERRIDE_RELEASE_FRAMES
+    self.low_speed_straight_pending_direction = 0
+    self.low_speed_straight_pending_frames = 0
 
     self.p = CarControllerParams(CP)
     self.packer = CANPacker(DBC[CP.carFingerprint][Bus.pt])
@@ -49,6 +58,59 @@ class CarController(CarControllerBase, SnGCarController):
     delta = delta - deadband if delta > 0 else delta + deadband
     alpha = np.interp(v_ego, [0.0, LOW_SPEED_SMOOTH_MAX_SPEED], [LOW_SPEED_SMOOTH_ALPHA_MIN, 1.0])
     return self.apply_angle_last + alpha * delta
+
+  def _reset_low_speed_straight_stability(self):
+    self.low_speed_straight_pending_direction = 0
+    self.low_speed_straight_pending_frames = 0
+
+  @staticmethod
+  def _angle_direction(angle: float) -> int:
+    if angle > LOW_SPEED_STRAIGHT_SIGN_EPSILON:
+      return 1
+    if angle < -LOW_SPEED_STRAIGHT_SIGN_EPSILON:
+      return -1
+    return 0
+
+  def _get_low_speed_stable_angle_target(self, raw_target: float, CS) -> float:
+    if CS.out.vEgoRaw >= LOW_SPEED_SMOOTH_MAX_SPEED or CS.out.standstill or CS.out.steeringPressed:
+      self._reset_low_speed_straight_stability()
+      return raw_target
+
+    measured_angle = CS.out.steeringAngleDeg
+    if abs(raw_target) > LOW_SPEED_STRAIGHT_STABILITY_TARGET_MAX or \
+       abs(measured_angle) > LOW_SPEED_STRAIGHT_STABILITY_STEER_MAX or \
+       abs(self.apply_angle_last) > LOW_SPEED_STRAIGHT_STABILITY_STEER_MAX:
+      self._reset_low_speed_straight_stability()
+      return raw_target
+
+    if abs(raw_target) <= LOW_SPEED_STRAIGHT_CENTER_HOLD_TARGET_MAX and \
+       abs(measured_angle) <= LOW_SPEED_STRAIGHT_CENTER_HOLD_STEER_MAX:
+      self._reset_low_speed_straight_stability()
+      return 0.0
+
+    target_direction = self._angle_direction(raw_target)
+    current_direction = self._angle_direction(self.apply_angle_last)
+    if target_direction == 0:
+      self._reset_low_speed_straight_stability()
+      return 0.0
+
+    needs_release = abs(raw_target) < LOW_SPEED_STRAIGHT_SIGN_RELEASE_TARGET and \
+      (current_direction == 0 or current_direction != target_direction)
+    if not needs_release:
+      self._reset_low_speed_straight_stability()
+      return raw_target
+
+    if self.low_speed_straight_pending_direction != target_direction:
+      self.low_speed_straight_pending_direction = target_direction
+      self.low_speed_straight_pending_frames = 1
+    else:
+      self.low_speed_straight_pending_frames += 1
+
+    if self.low_speed_straight_pending_frames < LOW_SPEED_STRAIGHT_SIGN_RELEASE_FRAMES:
+      return 0.0 if current_direction == 0 else self.apply_angle_last
+
+    self._reset_low_speed_straight_stability()
+    return raw_target
 
   def handle_angle_lateral(self, CC, CS):
     # Angle-LKAS can hard fault during low-speed MADS lateral-only maneuvers.
@@ -78,6 +140,9 @@ class CarController(CarControllerBase, SnGCarController):
     if lkas_request and CS.out.vEgoRaw < LOW_SPEED_SMOOTH_MAX_SPEED:
       # Low-speed damping to reduce left-right command chatter while retaining large steering authority.
       steer_target = self._get_low_speed_smoothed_angle_target(steer_target, CS.out.vEgoRaw)
+      steer_target = self._get_low_speed_stable_angle_target(steer_target, CS)
+    else:
+      self._reset_low_speed_straight_stability()
 
     apply_steer = apply_std_steer_angle_limits(
       steer_target,

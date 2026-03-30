@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 from opendbc.car import structs
 from opendbc.car.subaru import subarucan
-from opendbc.car.subaru.carcontroller import CarController
+from opendbc.car.subaru.carcontroller import CarController, LOW_SPEED_STRAIGHT_SIGN_RELEASE_FRAMES
 from opendbc.car.subaru.interface import CarInterface
 from opendbc.car.subaru.values import CAR
 
@@ -40,9 +40,8 @@ class TestSubaruCarController(unittest.TestCase):
     controller.apply_angle_last = cs.out.steeringAngleDeg
 
     msg = controller.handle_angle_lateral(cc, cs)
-    expected = subarucan.create_steering_control_angle(controller.packer, cs.out.steeringAngleDeg, False)
-
-    self.assertEqual(msg, expected)
+    self.assertEqual(msg[0], 0x124)
+    self.assertEqual(msg[2], 0)
     self.assertAlmostEqual(controller.apply_angle_last, cs.out.steeringAngleDeg)
 
   def test_crosstrek_2025_params_construct(self):
@@ -51,6 +50,46 @@ class TestSubaruCarController(unittest.TestCase):
 
     self.assertEqual(CP.carFingerprint, CAR.SUBARU_CROSSTREK_2025)
     self.assertGreater(CP.maxLateralAccel, 0.0)
+
+  def test_low_speed_straight_stability_holds_alternating_small_requests_centered(self):
+    controller = self._build_controller()
+    cs = self._build_cs(3.0, 0.2)
+
+    held_targets = [
+      controller._get_low_speed_stable_angle_target(target, cs)
+      for target in (1.6, -1.6, 1.6, -1.6)
+    ]
+
+    self.assertEqual(held_targets, [0.0, 0.0, 0.0, 0.0])
+
+  def test_low_speed_straight_stability_requires_persistence_before_leaving_center(self):
+    controller = self._build_controller()
+    cs = self._build_cs(3.0, 0.2)
+
+    held_targets = [
+      controller._get_low_speed_stable_angle_target(1.8, cs)
+      for _ in range(LOW_SPEED_STRAIGHT_SIGN_RELEASE_FRAMES - 1)
+    ]
+    released_target = controller._get_low_speed_stable_angle_target(1.8, cs)
+
+    self.assertTrue(all(target == 0.0 for target in held_targets))
+    self.assertAlmostEqual(released_target, 1.8)
+
+  def test_low_speed_straight_stability_bypasses_real_turn_requests(self):
+    controller = self._build_controller()
+    cs = self._build_cs(3.0, 0.5)
+
+    stabilized_target = controller._get_low_speed_stable_angle_target(12.0, cs)
+
+    self.assertAlmostEqual(stabilized_target, 12.0)
+
+  def test_low_speed_straight_stability_bypasses_driver_input(self):
+    controller = self._build_controller()
+    cs = self._build_cs(3.0, 0.2, steering_pressed=True)
+
+    stabilized_target = controller._get_low_speed_stable_angle_target(1.6, cs)
+
+    self.assertAlmostEqual(stabilized_target, 1.6)
 
 
 if __name__ == "__main__":
