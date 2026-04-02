@@ -1,6 +1,7 @@
 import copy
 from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, structs
+from opendbc.car.carlog import carlog
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
 from opendbc.car.subaru.values import DBC, CanBus, SubaruFlags
@@ -19,6 +20,12 @@ class CarState(CarStateBase, MadsCarState, SnGCarState):
     self.shifter_values = can_define.dv["Transmission"]["Gear"]
 
     self.angle_rate_calulator = CanSignalRateCalculator(50)
+    self._debug_state = {}
+
+  def _log_transition(self, key, value, message):
+    if self._debug_state.get(key) != value:
+      carlog.info(f"subaru[{self.CP.carFingerprint}] {message}")
+      self._debug_state[key] = value
 
   def update(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:
     cp = can_parsers[Bus.pt]
@@ -84,7 +91,7 @@ class CarState(CarStateBase, MadsCarState, SnGCarState):
     ret.steeringTorqueEps = cp.vl["Steering_Torque"]["Steer_Torque_Output"]
 
     steer_threshold = 75 if self.CP.flags & SubaruFlags.PREGLOBAL else 80
-    ret.steeringPressed = abs(ret.steeringTorque) > steer_threshold
+    ret.steeringPressed = self.update_steering_pressed(abs(ret.steeringTorque) > steer_threshold, 5)
 
     cp_cruise = cp_alt if self.CP.flags & SubaruFlags.GLOBAL_GEN2 else cp
     cp_es_brake = cp_alt if self.CP.flags & SubaruFlags.GLOBAL_GEN2 else cp_cam
@@ -143,6 +150,44 @@ class CarState(CarStateBase, MadsCarState, SnGCarState):
     self.es_dashstatus_msg = copy.copy(cp_cam.vl["ES_DashStatus"])
     if self.CP.flags & SubaruFlags.SEND_INFOTAINMENT:
       self.es_infotainment_msg = copy.copy(cp_cam.vl["ES_Infotainment"])
+
+    if self.CP.flags & SubaruFlags.LKAS_ANGLE:
+      self._log_transition("steering_signal_valid", steering_updated,
+                           f"angle Steering_2 valid={steering_updated} angle={ret.steeringAngleDeg:.2f}")
+      self._log_transition("cruise_available", ret.cruiseState.available,
+                           f"ACC available={ret.cruiseState.available} via ES_DashStatus")
+      self._log_transition("cruise_enabled", ret.cruiseState.enabled,
+                           f"ACC enabled={ret.cruiseState.enabled} via ES_Status")
+      self._log_transition("steer_fault_temporary", ret.steerFaultTemporary,
+                           f"steerFaultTemporary={ret.steerFaultTemporary} angle={ret.steeringAngleDeg:.2f} "
+                           f"rate={ret.steeringRateDeg:.2f} torque={ret.steeringTorque:.2f} "
+                           f"torqueEps={ret.steeringTorqueEps:.2f} cruiseEnabled={ret.cruiseState.enabled} "
+                           f"cruiseAvailable={ret.cruiseState.available}")
+      self._log_transition("steer_fault_permanent", ret.steerFaultPermanent,
+                           f"steerFaultPermanent={ret.steerFaultPermanent} angle={ret.steeringAngleDeg:.2f} "
+                           f"rate={ret.steeringRateDeg:.2f} torque={ret.steeringTorque:.2f} "
+                           f"torqueEps={ret.steeringTorqueEps:.2f} cruiseEnabled={ret.cruiseState.enabled} "
+                           f"cruiseAvailable={ret.cruiseState.available}")
+
+      dash_status_state = (
+        cp_cam.vl["ES_DashStatus"]["Cruise_On"],
+        cp_cam.vl["ES_DashStatus"]["Cruise_State"],
+        cp_cam.vl["ES_DashStatus"]["Conventional_Cruise"],
+      )
+      self._log_transition(
+        "es_dashstatus_state",
+        dash_status_state,
+        "ES_DashStatus "
+        f"Cruise_On={dash_status_state[0]} Cruise_State={dash_status_state[1]} "
+        f"Conventional_Cruise={dash_status_state[2]}",
+      )
+
+      if not (self.CP.flags & SubaruFlags.HYBRID):
+        es_status_cruise = cp_es_brake.vl["ES_Status"]["Cruise_Activated"]
+        self._log_transition("es_status_cruise_activated", es_status_cruise,
+                             f"ES_Status Cruise_Activated={es_status_cruise}")
+        self._log_transition("eyesight_fault", eyesight_fault,
+                             f"Eyesight cruise fault={eyesight_fault}")
 
     MadsCarState.update_mads(self, ret, can_parsers)
     SnGCarState.update(self, ret, can_parsers)

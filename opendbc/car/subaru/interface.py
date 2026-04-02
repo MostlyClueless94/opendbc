@@ -43,8 +43,6 @@ class CarInterface(CarInterfaceBase):
     if ret.flags & SubaruFlags.LKAS_ANGLE:
       ret.steerControlType = structs.CarParams.SteerControlType.angle
       ret.safetyConfigs[0].safetyParam |= SubaruSafetyFlags.LKAS_ANGLE.value
-      if candidate == CAR.SUBARU_CROSSTREK_2025:
-        ret.steerActuatorDelay = 0.3
 
     elif candidate == CAR.SUBARU_ASCENT:
       ret.steerActuatorDelay = 0.3  # end-to-end angle controller
