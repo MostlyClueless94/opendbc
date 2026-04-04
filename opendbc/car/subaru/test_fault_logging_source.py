@@ -47,6 +47,17 @@ def test_carcontroller_request_logs_include_target_and_handoff_context():
   assert 'measuredRate={CS.out.steeringRateDeg:.2f}' in source
   assert 'handoffActive={handoff_active}' in source
   assert 'rampActive={manual_override_ramp_active}' in source
+  assert 'hardOverride={hard_driver_override}' in source
+  assert 'softContact={soft_contact_active}' in source
+
+
+def test_carcontroller_logs_generalized_override_and_soft_contact_state():
+  source = _read(CARCONTROLLER)
+  assert 'angle driver override hold active={self.angle_driver_override_hold_frames > 0}' in source
+  assert 'angle soft contact active={soft_contact_active}' in source
+  assert 'angle driver override ramp active={manual_override_ramp_active}' in source
+  assert 'MADS manual override hold active=' not in source
+  assert 'MADS manual override ramp active=' not in source
 
 
 def test_carcontroller_no_longer_reads_chatter_toggle_param():
