@@ -30,6 +30,15 @@ def test_carstate_publishes_subaru_brake_light_state_for_ui():
   assert 'cp_es_brake.vl["ES_Status"]["Brake_Lights"] != 0' in source
 
 
+def test_carstate_publishes_subaru_cluster_speed_for_ui_toggle():
+  source = _read(CARSTATE)
+  assert 'self.cluster_speed_hyst_gap = CV.KPH_TO_MS / 2.' in source
+  assert 'self.cluster_min_speed = CV.KPH_TO_MS / 2.' in source
+  assert 'cluster_speed_kph = cp.vl["Brake_Pedal"]["Speed"]' in source
+  assert 'cluster_speed_kph = max(cp.vl["Brake_Pedal"]["Speed"], cp_alt.vl["Brake_Pedal"]["Speed"])' in source
+  assert 'ret.vEgoCluster = cluster_speed_kph * CV.KPH_TO_MS' in source
+
+
 def test_carcontroller_request_logs_include_target_and_handoff_context():
   source = _read(CARCONTROLLER)
   assert 'angle LKAS request={lkas_request} inhibit={inhibit_reason} target={steer_target:.2f}' in source

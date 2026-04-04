@@ -18,6 +18,8 @@ class CarState(CarStateBase, MadsCarState, SnGCarState):
     SnGCarState.__init__(self, CP, CP_SP)
     can_define = CANDefine(DBC[CP.carFingerprint][Bus.pt])
     self.shifter_values = can_define.dv["Transmission"]["Gear"]
+    self.cluster_speed_hyst_gap = CV.KPH_TO_MS / 2.
+    self.cluster_min_speed = CV.KPH_TO_MS / 2.
 
     self.angle_rate_calulator = CanSignalRateCalculator(50)
     self._debug_state = {}
@@ -59,6 +61,13 @@ class CarState(CarStateBase, MadsCarState, SnGCarState):
       cp_wheels.vl["Wheel_Speeds"]["RL"],
       cp_wheels.vl["Wheel_Speeds"]["RR"],
     )
+    if self.CP.flags & SubaruFlags.PREGLOBAL:
+      cluster_speed_kph = cp.vl["Brake_Pedal"]["Speed"]
+    else:
+      # Global Subaru cluster speed lives on Brake_Pedal.Speed. Some newer platforms mirror brake-related
+      # messages on the alt bus, so prefer whichever bus is actively carrying the signal.
+      cluster_speed_kph = max(cp.vl["Brake_Pedal"]["Speed"], cp_alt.vl["Brake_Pedal"]["Speed"])
+    ret.vEgoCluster = cluster_speed_kph * CV.KPH_TO_MS
     ret.standstill = ret.vEgoRaw == 0
 
     # continuous blinker signals for assisted lane change
