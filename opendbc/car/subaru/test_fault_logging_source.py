@@ -21,6 +21,15 @@ def test_carstate_fault_logs_include_steering_and_cruise_context():
   assert 'cruiseAvailable={ret.cruiseState.available}' in source
 
 
+def test_carstate_publishes_subaru_brake_light_state_for_ui():
+  source = _read(CARSTATE)
+  assert 'ret_sp.brakeLightsAvailable = not (self.CP.flags & SubaruFlags.PREGLOBAL)' in source
+  assert 'ret_sp.brakeLightsOn = ret.brakePressed' in source
+  assert 'cp_cam.vl["ES_DashStatus"]["Brake_Lights"] != 0' in source
+  assert 'cp_es_brake.vl["ES_Brake"]["Cruise_Brake_Lights"] != 0' in source
+  assert 'cp_es_brake.vl["ES_Status"]["Brake_Lights"] != 0' in source
+
+
 def test_carcontroller_request_logs_include_target_and_handoff_context():
   source = _read(CARCONTROLLER)
   assert 'angle LKAS request={lkas_request} inhibit={inhibit_reason} target={steer_target:.2f}' in source

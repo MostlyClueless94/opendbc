@@ -95,6 +95,16 @@ class CarState(CarStateBase, MadsCarState, SnGCarState):
 
     cp_cruise = cp_alt if self.CP.flags & SubaruFlags.GLOBAL_GEN2 else cp
     cp_es_brake = cp_alt if self.CP.flags & SubaruFlags.GLOBAL_GEN2 else cp_cam
+    ret_sp.brakeLightsAvailable = not (self.CP.flags & SubaruFlags.PREGLOBAL)
+    ret_sp.brakeLightsOn = ret.brakePressed
+    if ret_sp.brakeLightsAvailable:
+      ret_sp.brakeLightsOn = bool(
+        ret_sp.brakeLightsOn
+        or cp_cam.vl["ES_DashStatus"]["Brake_Lights"] != 0
+        or cp_es_brake.vl["ES_Brake"]["Cruise_Brake_Lights"] != 0
+      )
+      if not (self.CP.flags & SubaruFlags.HYBRID):
+        ret_sp.brakeLightsOn = bool(ret_sp.brakeLightsOn or cp_es_brake.vl["ES_Status"]["Brake_Lights"] != 0)
 
     if self.CP.flags & SubaruFlags.HYBRID:
       # ES_DashStatus->Cruise_Activated_Dash is likely intended for the dash display only, as it falls

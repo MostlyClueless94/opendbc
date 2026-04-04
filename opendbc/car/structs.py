@@ -170,3 +170,5 @@ class CarControlSP:
 @auto_dataclass
 class CarStateSP:
   speedLimit: float = auto_field()
+  brakeLightsOn: bool = auto_field()
+  brakeLightsAvailable: bool = auto_field()
