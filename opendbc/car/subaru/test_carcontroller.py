@@ -7,6 +7,7 @@ from opendbc.car.subaru import subarucan
 from opendbc.car.subaru.carcontroller import (
   CarController,
   LOW_SPEED_SMOOTH_MAX_SPEED,
+  MADS_ONLY_MIN_SPEED,
   LOW_SPEED_STRAIGHT_SIGN_RELEASE_FRAMES,
   MADS_MANUAL_OVERRIDE_HOLD_FRAMES,
   MADS_MANUAL_OVERRIDE_RAMP_FRAMES,
@@ -25,12 +26,12 @@ from opendbc.car.tests.routes import routes
 
 class TestSubaruCarController(unittest.TestCase):
   @staticmethod
-  def _build_cs(v_ego_raw, steering_angle_deg, steering_pressed=False):
+  def _build_cs(v_ego_raw, steering_angle_deg, steering_pressed=False, standstill=False):
     return SimpleNamespace(out=SimpleNamespace(
       vEgoRaw=v_ego_raw,
       steeringAngleDeg=steering_angle_deg,
       gearShifter=structs.CarState.GearShifter.drive,
-      standstill=False,
+      standstill=standstill,
       steeringPressed=steering_pressed,
     ))
 
@@ -160,6 +161,66 @@ class TestSubaruCarController(unittest.TestCase):
     self.assertEqual(controller.mads_manual_override_hold_frames, 0)
     self.assertEqual(controller.mads_manual_override_ramp_frames, 0)
     self.assertNotAlmostEqual(controller.apply_angle_last, cs.out.steeringAngleDeg)
+
+  def test_mads_only_below_one_mph_still_inhibits_angle_lkas(self):
+    controller = self._build_controller()
+    cs = self._build_cs(0.22352, 10.0)
+    cc = self._build_cc(True, False, 14.0)
+    controller.apply_angle_last = cs.out.steeringAngleDeg
+
+    msg = controller.handle_angle_lateral(cc, cs)
+    expected = subarucan.create_steering_control_angle(controller.packer, cs.out.steeringAngleDeg, False)
+
+    self.assertEqual(msg, expected)
+    self.assertAlmostEqual(controller.apply_angle_last, cs.out.steeringAngleDeg)
+
+  def test_mads_only_just_above_one_mph_allows_angle_lkas(self):
+    controller = self._build_controller()
+    cs = self._build_cs(MADS_ONLY_MIN_SPEED + 0.01, 10.0)
+    cc = self._build_cc(True, False, 14.0)
+    controller.apply_angle_last = cs.out.steeringAngleDeg
+
+    msg = controller.handle_angle_lateral(cc, cs)
+    inhibited = subarucan.create_steering_control_angle(controller.packer, cs.out.steeringAngleDeg, False)
+
+    self.assertNotEqual(msg, inhibited)
+    self.assertGreater(controller.apply_angle_last, cs.out.steeringAngleDeg)
+
+  def test_mads_only_standstill_still_inhibits_above_one_mph(self):
+    controller = self._build_controller()
+    cs = self._build_cs(MADS_ONLY_MIN_SPEED + 0.5, 10.0, standstill=True)
+    cc = self._build_cc(True, False, 14.0)
+    controller.apply_angle_last = cs.out.steeringAngleDeg
+
+    msg = controller.handle_angle_lateral(cc, cs)
+    expected = subarucan.create_steering_control_angle(controller.packer, cs.out.steeringAngleDeg, False)
+
+    self.assertEqual(msg, expected)
+    self.assertAlmostEqual(controller.apply_angle_last, cs.out.steeringAngleDeg)
+
+  def test_mads_only_angle_limit_still_inhibits_above_one_mph(self):
+    controller = self._build_controller()
+    cs = self._build_cs(MADS_ONLY_MIN_SPEED + 0.5, 120.0)
+    cc = self._build_cc(True, False, 124.0)
+    controller.apply_angle_last = cs.out.steeringAngleDeg
+
+    msg = controller.handle_angle_lateral(cc, cs)
+    expected = subarucan.create_steering_control_angle(controller.packer, cs.out.steeringAngleDeg, False)
+
+    self.assertEqual(msg, expected)
+    self.assertAlmostEqual(controller.apply_angle_last, cs.out.steeringAngleDeg)
+
+  def test_full_engaged_lateral_ignores_mads_only_low_speed_floor(self):
+    controller = self._build_controller()
+    cs = self._build_cs(0.22352, 10.0)
+    cc = self._build_cc(True, True, 14.0)
+    controller.apply_angle_last = cs.out.steeringAngleDeg
+
+    msg = controller.handle_angle_lateral(cc, cs)
+    inhibited = subarucan.create_steering_control_angle(controller.packer, cs.out.steeringAngleDeg, False)
+
+    self.assertNotEqual(msg, inhibited)
+    self.assertGreater(controller.apply_angle_last, cs.out.steeringAngleDeg)
 
   def test_low_speed_straight_stability_holds_alternating_small_requests_centered(self):
     controller = self._build_controller()

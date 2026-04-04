@@ -14,7 +14,7 @@ from opendbc.sunnypilot.car.subaru.stop_and_go import SnGCarController
 # involves the total steering angle change rather than rate, but these limits work well for now
 MAX_STEER_RATE = 25  # deg/s
 MAX_STEER_RATE_FRAMES = 7  # tx control frames needed before torque can be cut
-MADS_ONLY_MIN_SPEED = 2.24  # m/s (5 mph)
+MADS_ONLY_MIN_SPEED = 0.44704  # m/s (1 mph)
 MADS_ONLY_MAX_STEER_ANGLE = 120.0  # deg
 MADS_MANUAL_OVERRIDE_HOLD_FRAMES = 10  # steering command frames (~200 ms with STEER_STEP=2)
 MADS_MANUAL_OVERRIDE_RAMP_FRAMES = 8  # steering command frames (~160 ms with STEER_STEP=2)
@@ -289,8 +289,8 @@ class CarController(CarControllerBase, SnGCarController):
     return filtered_target, True, sign_flip_clamped
 
   def handle_angle_lateral(self, CC, CS):
-    # Angle-LKAS can hard fault during low-speed MADS lateral-only maneuvers.
-    # Keep MADS behavior above 5 mph, but block sharp parking-lot style steering in lateral-only mode.
+    # Angle-LKAS can hard fault during very low-speed MADS lateral-only maneuvers.
+    # Keep MADS behavior above 1 mph, but block sharp parking-lot style steering in lateral-only mode.
     mads_only = CC.latActive and not CC.enabled
     mads_only_ok = CS.out.vEgoRaw > MADS_ONLY_MIN_SPEED and abs(CS.out.steeringAngleDeg) < MADS_ONLY_MAX_STEER_ANGLE
     lkas_allowed = CC.latActive and (CC.enabled or not mads_only or mads_only_ok) and \
