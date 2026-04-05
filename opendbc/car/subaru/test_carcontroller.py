@@ -5,12 +5,12 @@ from opendbc.car import structs
 from opendbc.car.subaru.fingerprints import FW_VERSIONS
 from opendbc.car.subaru import subarucan
 from opendbc.car.subaru.carcontroller import (
+  ANGLE_DRIVER_OVERRIDE_HOLD_FRAMES,
+  ANGLE_DRIVER_OVERRIDE_RAMP_FRAMES,
   CarController,
   LOW_SPEED_SMOOTH_MAX_SPEED,
   MADS_ONLY_MIN_SPEED,
   LOW_SPEED_STRAIGHT_SIGN_RELEASE_FRAMES,
-  MADS_MANUAL_OVERRIDE_HOLD_FRAMES,
-  MADS_MANUAL_OVERRIDE_RAMP_FRAMES,
   SUBARU_CENTER_DAMPING_ALPHA_SCALES,
   SUBARU_CENTER_DAMPING_DEADBAND_SCALES,
   SUBARU_CENTER_DAMPING_SIGN_FLIP_SCALES,
@@ -26,10 +26,11 @@ from opendbc.car.tests.routes import routes
 
 class TestSubaruCarController(unittest.TestCase):
   @staticmethod
-  def _build_cs(v_ego_raw, steering_angle_deg, steering_pressed=False, standstill=False):
+  def _build_cs(v_ego_raw, steering_angle_deg, steering_pressed=False, standstill=False, steering_rate_deg=0.0):
     return SimpleNamespace(out=SimpleNamespace(
       vEgoRaw=v_ego_raw,
       steeringAngleDeg=steering_angle_deg,
+      steeringRateDeg=steering_rate_deg,
       gearShifter=structs.CarState.GearShifter.drive,
       standstill=standstill,
       steeringPressed=steering_pressed,
@@ -48,19 +49,20 @@ class TestSubaruCarController(unittest.TestCase):
     CP_SP = CarInterface.get_non_essential_params_sp(CP, CAR.SUBARU_OUTBACK_2023)
     return CarController({}, CP, CP_SP)
 
-  def _prime_mads_manual_override_ramp(self, controller, cc, v_ego_raw=8.0, measured_angle=10.0):
+  def _prime_angle_driver_override_ramp(self, controller, cc, v_ego_raw=8.0, measured_angle=10.0):
     controller.apply_angle_last = measured_angle
 
     controller.handle_angle_lateral(cc, self._build_cs(v_ego_raw, measured_angle, steering_pressed=True))
     released_cs = self._build_cs(v_ego_raw, measured_angle, steering_pressed=False)
-    for _ in range(MADS_MANUAL_OVERRIDE_HOLD_FRAMES):
+    for _ in range(ANGLE_DRIVER_OVERRIDE_HOLD_FRAMES):
       controller.handle_angle_lateral(cc, released_cs)
 
-    self.assertEqual(controller.mads_manual_override_hold_frames, 0)
-    self.assertEqual(controller.mads_manual_override_ramp_frames, MADS_MANUAL_OVERRIDE_RAMP_FRAMES)
+    self.assertEqual(controller.angle_driver_override_hold_frames, 0)
+    self.assertEqual(controller.angle_driver_override_ramp_frames, ANGLE_DRIVER_OVERRIDE_RAMP_FRAMES)
+    self.assertAlmostEqual(controller.angle_driver_override_ramp_start_angle, measured_angle)
     return released_cs
 
-  def test_mads_manual_override_still_wins(self):
+  def test_angle_driver_override_still_wins_in_mads_only(self):
     controller = self._build_controller()
     expected_controller = self._build_controller()
     cs = self._build_cs(9.5, 20.56, steering_pressed=True)
@@ -74,7 +76,21 @@ class TestSubaruCarController(unittest.TestCase):
     self.assertEqual(msg, expected)
     self.assertAlmostEqual(controller.apply_angle_last, cs.out.steeringAngleDeg)
 
-  def test_mads_manual_override_hold_persists_after_steering_pressed_clears(self):
+  def test_angle_driver_override_still_wins_in_full_engaged(self):
+    controller = self._build_controller()
+    expected_controller = self._build_controller()
+    cs = self._build_cs(9.5, 20.56, steering_pressed=True)
+    cc = self._build_cc(True, True, 19.86)
+
+    controller.apply_angle_last = cs.out.steeringAngleDeg
+
+    msg = controller.handle_angle_lateral(cc, cs)
+    expected = subarucan.create_steering_control_angle(expected_controller.packer, cs.out.steeringAngleDeg, False)
+
+    self.assertEqual(msg, expected)
+    self.assertAlmostEqual(controller.apply_angle_last, cs.out.steeringAngleDeg)
+
+  def test_angle_driver_override_hold_persists_after_steering_pressed_clears_in_mads_only(self):
     controller = self._build_controller()
     cs_pressed = self._build_cs(8.0, 10.0, steering_pressed=True)
     cc = self._build_cc(True, False, 14.0)
@@ -87,17 +103,34 @@ class TestSubaruCarController(unittest.TestCase):
     expected = subarucan.create_steering_control_angle(controller.packer, cs_released.out.steeringAngleDeg, False)
 
     self.assertEqual(msg, expected)
-    self.assertEqual(controller.mads_manual_override_hold_frames, MADS_MANUAL_OVERRIDE_HOLD_FRAMES - 1)
-    self.assertEqual(controller.mads_manual_override_ramp_frames, 0)
+    self.assertEqual(controller.angle_driver_override_hold_frames, ANGLE_DRIVER_OVERRIDE_HOLD_FRAMES - 1)
+    self.assertEqual(controller.angle_driver_override_ramp_frames, 0)
     self.assertAlmostEqual(controller.apply_angle_last, cs_released.out.steeringAngleDeg)
 
-  def test_mads_manual_override_ramp_progresses_monotonically_toward_target(self):
+  def test_angle_driver_override_hold_persists_after_steering_pressed_clears_in_full_engaged(self):
+    controller = self._build_controller()
+    cs_pressed = self._build_cs(8.0, 10.0, steering_pressed=True)
+    cc = self._build_cc(True, True, 14.0)
+
+    controller.apply_angle_last = cs_pressed.out.steeringAngleDeg
+    controller.handle_angle_lateral(cc, cs_pressed)
+
+    cs_released = self._build_cs(8.0, 10.0, steering_pressed=False)
+    msg = controller.handle_angle_lateral(cc, cs_released)
+    expected = subarucan.create_steering_control_angle(controller.packer, cs_released.out.steeringAngleDeg, False)
+
+    self.assertEqual(msg, expected)
+    self.assertEqual(controller.angle_driver_override_hold_frames, ANGLE_DRIVER_OVERRIDE_HOLD_FRAMES - 1)
+    self.assertEqual(controller.angle_driver_override_ramp_frames, 0)
+    self.assertAlmostEqual(controller.apply_angle_last, cs_released.out.steeringAngleDeg)
+
+  def test_angle_driver_override_ramp_progresses_monotonically_toward_live_target_in_mads_only(self):
     controller = self._build_controller()
     cc = self._build_cc(True, False, 14.0)
-    cs_released = self._prime_mads_manual_override_ramp(controller, cc)
+    cs_released = self._prime_angle_driver_override_ramp(controller, cc)
 
     ramped_angles = []
-    for _ in range(4):
+    for _ in range(6):
       controller.handle_angle_lateral(cc, cs_released)
       ramped_angles.append(controller.apply_angle_last)
 
@@ -105,62 +138,37 @@ class TestSubaruCarController(unittest.TestCase):
     self.assertGreater(ramped_angles[-1], cs_released.out.steeringAngleDeg)
     self.assertLessEqual(ramped_angles[-1], cc.actuators.steeringAngleDeg)
 
-  def test_mads_manual_override_ramp_target_is_captured_at_hold_exit(self):
+  def test_angle_driver_override_ramp_uses_live_target_in_full_engaged(self):
     controller = self._build_controller()
-    cc_release = self._build_cc(True, False, 14.0)
-    cs_released = self._prime_mads_manual_override_ramp(controller, cc_release)
-
-    self.assertAlmostEqual(controller.mads_manual_override_ramp_target_angle, 14.0)
-
-    cc_changed = self._build_cc(True, False, 18.0)
-    controller.handle_angle_lateral(cc_changed, cs_released)
-
-    self.assertAlmostEqual(controller.mads_manual_override_ramp_target_angle, 14.0)
-    self.assertLess(controller.apply_angle_last, 14.0)
-
-  def test_mads_manual_override_ramp_heads_toward_frozen_hold_exit_target(self):
-    controller = self._build_controller()
-    cc_release = self._build_cc(True, False, 14.0)
-    cs_released = self._prime_mads_manual_override_ramp(controller, cc_release)
-    cc_changed = self._build_cc(True, False, 18.0)
+    cc_release = self._build_cc(True, True, 14.0)
+    cs_released = self._prime_angle_driver_override_ramp(controller, cc_release)
+    cc_changed = self._build_cc(True, True, 18.0)
 
     ramped_angles = []
-    for _ in range(4):
+    for _ in range(10):
       controller.handle_angle_lateral(cc_changed, cs_released)
       ramped_angles.append(controller.apply_angle_last)
 
     self.assertTrue(all(left <= right for left, right in zip(ramped_angles, ramped_angles[1:])))
-    self.assertLessEqual(ramped_angles[-1], 14.0)
-    self.assertLess(ramped_angles[-1], cc_changed.actuators.steeringAngleDeg)
+    self.assertGreater(ramped_angles[-1], 14.0)
+    self.assertLessEqual(ramped_angles[-1], cc_changed.actuators.steeringAngleDeg)
 
-  def test_mads_manual_override_ramp_cancels_when_driver_input_returns(self):
+  def test_angle_driver_override_ramp_cancels_when_driver_input_returns(self):
     controller = self._build_controller()
-    cc = self._build_cc(True, False, 14.0)
-    cs_released = self._prime_mads_manual_override_ramp(controller, cc)
+    cc = self._build_cc(True, True, 14.0)
+    cs_released = self._prime_angle_driver_override_ramp(controller, cc)
 
     controller.handle_angle_lateral(cc, cs_released)
-    self.assertLess(controller.mads_manual_override_ramp_frames, MADS_MANUAL_OVERRIDE_RAMP_FRAMES)
+    self.assertLess(controller.angle_driver_override_ramp_frames, ANGLE_DRIVER_OVERRIDE_RAMP_FRAMES)
 
-    cs_pressed = self._build_cs(8.0, 10.0, steering_pressed=True)
+    cs_pressed = self._build_cs(8.0, 10.0, steering_pressed=True, steering_rate_deg=2.0)
     msg = controller.handle_angle_lateral(cc, cs_pressed)
     expected = subarucan.create_steering_control_angle(controller.packer, cs_pressed.out.steeringAngleDeg, False)
 
     self.assertEqual(msg, expected)
-    self.assertEqual(controller.mads_manual_override_hold_frames, MADS_MANUAL_OVERRIDE_HOLD_FRAMES)
-    self.assertEqual(controller.mads_manual_override_ramp_frames, 0)
+    self.assertEqual(controller.angle_driver_override_hold_frames, ANGLE_DRIVER_OVERRIDE_HOLD_FRAMES)
+    self.assertEqual(controller.angle_driver_override_ramp_frames, 0)
     self.assertAlmostEqual(controller.apply_angle_last, cs_pressed.out.steeringAngleDeg)
-
-  def test_mads_manual_override_release_logic_does_not_change_full_engaged_behavior(self):
-    controller = self._build_controller()
-    cs = self._build_cs(8.0, 10.0, steering_pressed=True)
-    cc = self._build_cc(True, True, 30.0)
-
-    controller.apply_angle_last = cs.out.steeringAngleDeg
-    controller.handle_angle_lateral(cc, cs)
-
-    self.assertEqual(controller.mads_manual_override_hold_frames, 0)
-    self.assertEqual(controller.mads_manual_override_ramp_frames, 0)
-    self.assertNotAlmostEqual(controller.apply_angle_last, cs.out.steeringAngleDeg)
 
   def test_mads_only_below_one_mph_still_inhibits_angle_lkas(self):
     controller = self._build_controller()

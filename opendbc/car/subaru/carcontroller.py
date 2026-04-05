@@ -16,8 +16,8 @@ MAX_STEER_RATE = 25  # deg/s
 MAX_STEER_RATE_FRAMES = 7  # tx control frames needed before torque can be cut
 MADS_ONLY_MIN_SPEED = 0.44704  # m/s (1 mph)
 MADS_ONLY_MAX_STEER_ANGLE = 120.0  # deg
-MADS_MANUAL_OVERRIDE_HOLD_FRAMES = 10  # steering command frames (~200 ms with STEER_STEP=2)
-MADS_MANUAL_OVERRIDE_RAMP_FRAMES = 8  # steering command frames (~160 ms with STEER_STEP=2)
+ANGLE_DRIVER_OVERRIDE_HOLD_FRAMES = 10  # steering command frames (~200 ms with STEER_STEP=2)
+ANGLE_DRIVER_OVERRIDE_RAMP_FRAMES = 18  # steering command frames (~360 ms with STEER_STEP=2)
 LOW_SPEED_SMOOTH_MAX_SPEED = 4.4704  # m/s (10 mph)
 LOW_SPEED_SMOOTH_DEADBAND_MAX = 0.8  # deg at 0 mph
 LOW_SPEED_SMOOTH_ALPHA_MIN = 0.35  # blend factor at 0 mph
@@ -67,10 +67,9 @@ class CarController(CarControllerBase, SnGCarController):
     self.mc_subaru_smoothing_tune = False
     self.mc_subaru_smoothing_strength = 0
     self.mc_subaru_center_damping_strength = 0
-    self.mads_manual_override_hold_frames = 0
-    self.mads_manual_override_ramp_frames = 0
-    self.mads_manual_override_ramp_start_angle = 0.0
-    self.mads_manual_override_ramp_target_angle = 0.0
+    self.angle_driver_override_hold_frames = 0
+    self.angle_driver_override_ramp_frames = 0
+    self.angle_driver_override_ramp_start_angle = 0.0
     self.low_speed_straight_pending_direction = 0
     self.low_speed_straight_pending_frames = 0
     self._update_params()
@@ -104,52 +103,63 @@ class CarController(CarControllerBase, SnGCarController):
       SUBARU_TUNING_STRENGTH_MAX,
     ))
 
-  def _reset_mads_manual_override_ramp(self):
-    self.mads_manual_override_ramp_frames = 0
-    self.mads_manual_override_ramp_start_angle = 0.0
-    self.mads_manual_override_ramp_target_angle = 0.0
+  def _reset_angle_driver_override_ramp(self):
+    self.angle_driver_override_ramp_frames = 0
+    self.angle_driver_override_ramp_start_angle = 0.0
 
-  def _reset_mads_manual_override_state(self):
-    self.mads_manual_override_hold_frames = 0
-    self._reset_mads_manual_override_ramp()
+  def _reset_angle_driver_override_state(self):
+    self.angle_driver_override_hold_frames = 0
+    self._reset_angle_driver_override_ramp()
 
-  def _start_mads_manual_override_ramp(self, measured_angle: float, lkas_target: float):
-    self.mads_manual_override_ramp_frames = MADS_MANUAL_OVERRIDE_RAMP_FRAMES
-    self.mads_manual_override_ramp_start_angle = measured_angle
-    self.mads_manual_override_ramp_target_angle = lkas_target
+  def _start_angle_driver_override_ramp(self, measured_angle: float):
+    self.angle_driver_override_ramp_frames = ANGLE_DRIVER_OVERRIDE_RAMP_FRAMES
+    self.angle_driver_override_ramp_start_angle = measured_angle
 
-  def _update_mads_manual_override_state(self, mads_only: bool, steering_pressed: bool, lkas_allowed: bool) -> tuple[bool, bool]:
-    if not mads_only or not lkas_allowed:
-      self._reset_mads_manual_override_state()
+  def _update_angle_driver_override_state(self, steering_pressed: bool, lkas_allowed: bool) -> tuple[bool, bool]:
+    if not lkas_allowed:
+      self._reset_angle_driver_override_state()
       return False, False
 
     if steering_pressed:
-      self.mads_manual_override_hold_frames = MADS_MANUAL_OVERRIDE_HOLD_FRAMES
-      self._reset_mads_manual_override_ramp()
+      self.angle_driver_override_hold_frames = ANGLE_DRIVER_OVERRIDE_HOLD_FRAMES
+      self._reset_angle_driver_override_ramp()
       return True, False
 
-    if self.mads_manual_override_hold_frames > 0:
-      self.mads_manual_override_hold_frames -= 1
-      if self.mads_manual_override_hold_frames == 0:
+    if self.angle_driver_override_hold_frames > 0:
+      self.angle_driver_override_hold_frames -= 1
+      if self.angle_driver_override_hold_frames == 0:
         return True, True
       return True, False
 
     return False, False
 
-  def _apply_mads_manual_override_ramp(self, steer_target: float) -> tuple[float, bool]:
-    if self.mads_manual_override_ramp_frames <= 0:
-      return steer_target, False
+  def _apply_angle_driver_override_ramp(self, live_steer_target: float) -> tuple[float, bool]:
+    if self.angle_driver_override_ramp_frames <= 0:
+      return live_steer_target, False
 
-    progress = (MADS_MANUAL_OVERRIDE_RAMP_FRAMES - self.mads_manual_override_ramp_frames + 1) / MADS_MANUAL_OVERRIDE_RAMP_FRAMES
-    ramped_target = self.mads_manual_override_ramp_start_angle + progress * (
-      self.mads_manual_override_ramp_target_angle - self.mads_manual_override_ramp_start_angle
+    progress = (ANGLE_DRIVER_OVERRIDE_RAMP_FRAMES - self.angle_driver_override_ramp_frames + 1) / ANGLE_DRIVER_OVERRIDE_RAMP_FRAMES
+    ramped_target = self.angle_driver_override_ramp_start_angle + progress * (
+      live_steer_target - self.angle_driver_override_ramp_start_angle
     )
 
-    self.mads_manual_override_ramp_frames -= 1
-    if self.mads_manual_override_ramp_frames <= 0:
-      self._reset_mads_manual_override_ramp()
+    self.angle_driver_override_ramp_frames -= 1
+    if self.angle_driver_override_ramp_frames <= 0:
+      self._reset_angle_driver_override_ramp()
 
     return ramped_target, True
+
+  def _get_angle_lkas_target(self, raw_target: float, CS, capture_lkas_target: bool) -> tuple[float, bool, float, bool, bool]:
+    if capture_lkas_target and CS.out.vEgoRaw < LOW_SPEED_SMOOTH_MAX_SPEED:
+      # Keep the existing MC low-speed stack intact, with the Lukas-inspired
+      # near-center delta deadzone now enabled by default.
+      steer_target = self._get_low_speed_smoothed_angle_target(raw_target, CS.out.vEgoRaw)
+      steer_target, delta_deadzone_active, delta_deadzone = self._get_low_speed_delta_deadzone_target(steer_target, CS, capture_lkas_target)
+      steer_target = self._get_low_speed_stable_angle_target(steer_target, CS)
+      steer_target, center_damping_active, sign_flip_clamped = self._get_low_speed_center_damped_angle_target(steer_target, CS)
+      return steer_target, delta_deadzone_active, delta_deadzone, center_damping_active, sign_flip_clamped
+
+    self._reset_low_speed_straight_stability()
+    return raw_target, False, 0.0, False, False
 
   def _get_low_speed_smoothed_angle_target(self, raw_target, v_ego):
     speed_factor = np.clip(v_ego / LOW_SPEED_SMOOTH_MAX_SPEED, 0.0, 1.0)
@@ -295,18 +305,17 @@ class CarController(CarControllerBase, SnGCarController):
     mads_only_ok = CS.out.vEgoRaw > MADS_ONLY_MIN_SPEED and abs(CS.out.steeringAngleDeg) < MADS_ONLY_MAX_STEER_ANGLE
     lkas_allowed = CC.latActive and (CC.enabled or not mads_only or mads_only_ok) and \
       CS.out.gearShifter == structs.CarState.GearShifter.drive and not CS.out.standstill
-    mads_manual_override, ramp_will_start = self._update_mads_manual_override_state(
-      mads_only,
+    angle_driver_override, ramp_will_start = self._update_angle_driver_override_state(
       CS.out.steeringPressed,
       lkas_allowed,
     )
-    lkas_request = lkas_allowed and not mads_manual_override
+    lkas_request = lkas_allowed and not angle_driver_override
     capture_lkas_target = lkas_request or ramp_will_start
 
     inhibit_reason = "none"
     if not CC.latActive:
       inhibit_reason = "lat_inactive"
-    elif mads_manual_override:
+    elif angle_driver_override:
       inhibit_reason = "manual_override"
     elif CS.out.gearShifter != structs.CarState.GearShifter.drive:
       inhibit_reason = "gear_not_drive"
@@ -317,36 +326,24 @@ class CarController(CarControllerBase, SnGCarController):
 
     self._log_transition("angle_lkas_inhibit", inhibit_reason, f"angle LKAS inhibit={inhibit_reason}")
     self._log_transition(
-      "mads_manual_override_hold",
-      self.mads_manual_override_hold_frames > 0,
-      f"MADS manual override hold active={self.mads_manual_override_hold_frames > 0} "
-      f"frames={self.mads_manual_override_hold_frames} steeringPressed={CS.out.steeringPressed}",
+      "angle_driver_override_hold",
+      self.angle_driver_override_hold_frames > 0,
+      f"angle driver override hold active={self.angle_driver_override_hold_frames > 0} "
+      f"frames={self.angle_driver_override_hold_frames} steeringPressed={CS.out.steeringPressed}",
     )
 
-    steer_target = CC.actuators.steeringAngleDeg
-    if capture_lkas_target and CS.out.vEgoRaw < LOW_SPEED_SMOOTH_MAX_SPEED:
-      # Keep the existing MC low-speed stack intact, with the Lukas-inspired
-      # near-center delta deadzone now enabled by default.
-      steer_target = self._get_low_speed_smoothed_angle_target(steer_target, CS.out.vEgoRaw)
-      steer_target, delta_deadzone_active, delta_deadzone = self._get_low_speed_delta_deadzone_target(steer_target, CS, capture_lkas_target)
-      steer_target = self._get_low_speed_stable_angle_target(steer_target, CS)
-      steer_target, center_damping_active, sign_flip_clamped = self._get_low_speed_center_damped_angle_target(steer_target, CS)
-    else:
-      self._reset_low_speed_straight_stability()
-      delta_deadzone_active = False
-      delta_deadzone = 0.0
-      center_damping_active = False
-      sign_flip_clamped = False
+    steer_target, delta_deadzone_active, delta_deadzone, center_damping_active, sign_flip_clamped = \
+      self._get_angle_lkas_target(CC.actuators.steeringAngleDeg, CS, capture_lkas_target)
 
     if ramp_will_start:
-      self._start_mads_manual_override_ramp(CS.out.steeringAngleDeg, steer_target)
+      self._start_angle_driver_override_ramp(CS.out.steeringAngleDeg)
 
     if lkas_request:
-      steer_target, manual_override_ramp_active = self._apply_mads_manual_override_ramp(steer_target)
+      steer_target, manual_override_ramp_active = self._apply_angle_driver_override_ramp(steer_target)
     else:
       manual_override_ramp_active = False
 
-    handoff_active = mads_manual_override or ramp_will_start or manual_override_ramp_active
+    handoff_active = angle_driver_override or ramp_will_start or manual_override_ramp_active
     self._log_transition(
       "angle_lkas_request",
       lkas_request,
@@ -376,11 +373,11 @@ class CarController(CarControllerBase, SnGCarController):
       f"target={steer_target:.2f} last={self.apply_angle_last:.2f} vEgo={CS.out.vEgoRaw:.2f}",
     )
     self._log_transition(
-      "mads_manual_override_ramp",
+      "angle_driver_override_ramp",
       manual_override_ramp_active,
-      f"MADS manual override ramp active={manual_override_ramp_active} "
-      f"frames={self.mads_manual_override_ramp_frames} start={self.mads_manual_override_ramp_start_angle:.2f} "
-      f"target={self.mads_manual_override_ramp_target_angle:.2f} steerTarget={steer_target:.2f}",
+      f"angle driver override ramp active={manual_override_ramp_active} "
+      f"frames={self.angle_driver_override_ramp_frames} start={self.angle_driver_override_ramp_start_angle:.2f} "
+      f"steerTarget={steer_target:.2f}",
     )
 
     apply_steer = apply_std_steer_angle_limits(

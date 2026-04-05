@@ -49,6 +49,14 @@ def test_carcontroller_request_logs_include_target_and_handoff_context():
   assert 'rampActive={manual_override_ramp_active}' in source
 
 
+def test_carcontroller_logs_neutral_angle_driver_override_state():
+  source = _read(CARCONTROLLER)
+  assert 'angle driver override hold active={self.angle_driver_override_hold_frames > 0}' in source
+  assert 'angle driver override ramp active={manual_override_ramp_active}' in source
+  assert 'MADS manual override hold active=' not in source
+  assert 'MADS manual override ramp active=' not in source
+
+
 def test_carcontroller_no_longer_reads_chatter_toggle_param():
   source = _read(CARCONTROLLER)
   assert "MCSubaruChatterFix" not in source
