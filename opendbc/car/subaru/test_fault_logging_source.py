@@ -53,6 +53,10 @@ def test_carcontroller_logs_neutral_angle_driver_override_state():
   source = _read(CARCONTROLLER)
   assert 'angle driver override hold active={self.angle_driver_override_hold_frames > 0}' in source
   assert 'angle driver override ramp active={manual_override_ramp_active}' in source
+  assert 'MCSubaruManualYieldResumeSpeed' in source
+  assert 'MCSubaruManualYieldResumeSoftness' in source
+  assert 'totalFrames={self.angle_driver_override_ramp_total_frames}' in source
+  assert 'softnessExponent={self.angle_driver_override_ramp_softness_exponent:.2f}' in source
   assert 'MADS manual override hold active=' not in source
   assert 'MADS manual override ramp active=' not in source
 

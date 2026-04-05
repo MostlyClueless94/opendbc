@@ -17,7 +17,15 @@ MAX_STEER_RATE_FRAMES = 7  # tx control frames needed before torque can be cut
 MADS_ONLY_MIN_SPEED = 0.44704  # m/s (1 mph)
 MADS_ONLY_MAX_STEER_ANGLE = 120.0  # deg
 ANGLE_DRIVER_OVERRIDE_HOLD_FRAMES = 10  # steering command frames (~200 ms with STEER_STEP=2)
-ANGLE_DRIVER_OVERRIDE_RAMP_FRAMES = 18  # steering command frames (~360 ms with STEER_STEP=2)
+ANGLE_DRIVER_OVERRIDE_RAMP_SPEED_MIN = 0
+ANGLE_DRIVER_OVERRIDE_RAMP_SPEED_MAX = 4
+ANGLE_DRIVER_OVERRIDE_RAMP_SPEED_DEFAULT = 1
+ANGLE_DRIVER_OVERRIDE_RAMP_FRAMES = 18  # default Medium ramp (steering command frames, ~360 ms with STEER_STEP=2)
+ANGLE_DRIVER_OVERRIDE_RAMP_FRAME_OPTIONS = [12, 18, 24, 30, 36]
+ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_MIN = 0
+ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_MAX = 4
+ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_DEFAULT = 0
+ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_EXPONENTS = [1.0, 1.25, 1.5, 2.0, 2.5]
 LOW_SPEED_SMOOTH_MAX_SPEED = 4.4704  # m/s (10 mph)
 LOW_SPEED_SMOOTH_DEADBAND_MAX = 0.8  # deg at 0 mph
 LOW_SPEED_SMOOTH_ALPHA_MIN = 0.35  # blend factor at 0 mph
@@ -67,9 +75,13 @@ class CarController(CarControllerBase, SnGCarController):
     self.mc_subaru_smoothing_tune = False
     self.mc_subaru_smoothing_strength = 0
     self.mc_subaru_center_damping_strength = 0
+    self.mc_subaru_manual_yield_resume_speed = ANGLE_DRIVER_OVERRIDE_RAMP_SPEED_DEFAULT
+    self.mc_subaru_manual_yield_resume_softness = ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_DEFAULT
     self.angle_driver_override_hold_frames = 0
     self.angle_driver_override_ramp_frames = 0
+    self.angle_driver_override_ramp_total_frames = ANGLE_DRIVER_OVERRIDE_RAMP_FRAMES
     self.angle_driver_override_ramp_start_angle = 0.0
+    self.angle_driver_override_ramp_softness_exponent = ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_EXPONENTS[ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_DEFAULT]
     self.low_speed_straight_pending_direction = 0
     self.low_speed_straight_pending_frames = 0
     self._update_params()
@@ -90,6 +102,22 @@ class CarController(CarControllerBase, SnGCarController):
   def _get_strength_scale(strength: int, values: list[float]) -> float:
     return float(np.interp(strength, SUBARU_TUNING_SCALE_POINTS, values))
 
+  @staticmethod
+  def _get_resume_speed_frames(speed_setting: int) -> int:
+    return ANGLE_DRIVER_OVERRIDE_RAMP_FRAME_OPTIONS[int(np.clip(
+      speed_setting,
+      ANGLE_DRIVER_OVERRIDE_RAMP_SPEED_MIN,
+      ANGLE_DRIVER_OVERRIDE_RAMP_SPEED_MAX,
+    ))]
+
+  @staticmethod
+  def _get_resume_softness_exponent(softness_setting: int) -> float:
+    return ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_EXPONENTS[int(np.clip(
+      softness_setting,
+      ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_MIN,
+      ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_MAX,
+    ))]
+
   def _update_params(self):
     self.mc_subaru_smoothing_tune = self.params.get_bool("MCSubaruSmoothingTune")
     self.mc_subaru_smoothing_strength = int(np.clip(
@@ -102,18 +130,35 @@ class CarController(CarControllerBase, SnGCarController):
       SUBARU_TUNING_STRENGTH_MIN,
       SUBARU_TUNING_STRENGTH_MAX,
     ))
+    self.mc_subaru_manual_yield_resume_speed = int(np.clip(
+      self._get_int_param("MCSubaruManualYieldResumeSpeed", ANGLE_DRIVER_OVERRIDE_RAMP_SPEED_DEFAULT),
+      ANGLE_DRIVER_OVERRIDE_RAMP_SPEED_MIN,
+      ANGLE_DRIVER_OVERRIDE_RAMP_SPEED_MAX,
+    ))
+    self.mc_subaru_manual_yield_resume_softness = int(np.clip(
+      self._get_int_param("MCSubaruManualYieldResumeSoftness", ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_DEFAULT),
+      ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_MIN,
+      ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_MAX,
+    ))
 
   def _reset_angle_driver_override_ramp(self):
     self.angle_driver_override_ramp_frames = 0
+    self.angle_driver_override_ramp_total_frames = ANGLE_DRIVER_OVERRIDE_RAMP_FRAMES
     self.angle_driver_override_ramp_start_angle = 0.0
+    self.angle_driver_override_ramp_softness_exponent = ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_EXPONENTS[ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_DEFAULT]
 
   def _reset_angle_driver_override_state(self):
     self.angle_driver_override_hold_frames = 0
     self._reset_angle_driver_override_ramp()
 
   def _start_angle_driver_override_ramp(self, measured_angle: float):
-    self.angle_driver_override_ramp_frames = ANGLE_DRIVER_OVERRIDE_RAMP_FRAMES
+    ramp_frames = self._get_resume_speed_frames(self.mc_subaru_manual_yield_resume_speed)
+    self.angle_driver_override_ramp_frames = ramp_frames
+    self.angle_driver_override_ramp_total_frames = ramp_frames
     self.angle_driver_override_ramp_start_angle = measured_angle
+    self.angle_driver_override_ramp_softness_exponent = self._get_resume_softness_exponent(
+      self.mc_subaru_manual_yield_resume_softness
+    )
 
   def _update_angle_driver_override_state(self, steering_pressed: bool, lkas_allowed: bool) -> tuple[bool, bool]:
     if not lkas_allowed:
@@ -137,8 +182,10 @@ class CarController(CarControllerBase, SnGCarController):
     if self.angle_driver_override_ramp_frames <= 0:
       return live_steer_target, False
 
-    progress = (ANGLE_DRIVER_OVERRIDE_RAMP_FRAMES - self.angle_driver_override_ramp_frames + 1) / ANGLE_DRIVER_OVERRIDE_RAMP_FRAMES
-    ramped_target = self.angle_driver_override_ramp_start_angle + progress * (
+    progress = (self.angle_driver_override_ramp_total_frames - self.angle_driver_override_ramp_frames + 1) / \
+      self.angle_driver_override_ramp_total_frames
+    eased_progress = progress ** self.angle_driver_override_ramp_softness_exponent
+    ramped_target = self.angle_driver_override_ramp_start_angle + eased_progress * (
       live_steer_target - self.angle_driver_override_ramp_start_angle
     )
 
@@ -376,7 +423,9 @@ class CarController(CarControllerBase, SnGCarController):
       "angle_driver_override_ramp",
       manual_override_ramp_active,
       f"angle driver override ramp active={manual_override_ramp_active} "
-      f"frames={self.angle_driver_override_ramp_frames} start={self.angle_driver_override_ramp_start_angle:.2f} "
+      f"framesRemaining={self.angle_driver_override_ramp_frames} totalFrames={self.angle_driver_override_ramp_total_frames} "
+      f"softnessExponent={self.angle_driver_override_ramp_softness_exponent:.2f} "
+      f"start={self.angle_driver_override_ramp_start_angle:.2f} "
       f"steerTarget={steer_target:.2f}",
     )
 
