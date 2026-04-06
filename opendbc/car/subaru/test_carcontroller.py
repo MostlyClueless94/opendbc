@@ -152,13 +152,14 @@ class TestSubaruCarController(unittest.TestCase):
     self.assertEqual(controller.angle_driver_override_ramp_frames, 0)
     self.assertAlmostEqual(controller.apply_angle_last, cs_released.out.steeringAngleDeg)
 
-  def test_angle_driver_override_default_resume_speed_still_uses_medium_frame_count(self):
+  def test_angle_driver_override_default_resume_profile_uses_the_new_staged_defaults(self):
     controller = self._build_controller()
     cc = self._build_cc(True, True, 14.0)
 
     self._prime_angle_driver_override_ramp(controller, cc)
 
     self.assertEqual(controller.angle_driver_override_ramp_frames, ANGLE_DRIVER_OVERRIDE_RAMP_FRAMES)
+    self.assertAlmostEqual(controller.angle_driver_override_ramp_softness_exponent, ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_EXPONENTS[4])
 
   def test_angle_driver_override_resume_speed_profiles_map_to_expected_frame_counts(self):
     expected_frame_counts = {
@@ -167,6 +168,8 @@ class TestSubaruCarController(unittest.TestCase):
       2: 24,
       3: 30,
       4: 36,
+      5: 42,
+      6: 48,
     }
 
     for speed_setting, expected_frames in expected_frame_counts.items():
@@ -177,6 +180,25 @@ class TestSubaruCarController(unittest.TestCase):
 
       self.assertEqual(controller.angle_driver_override_ramp_frames, expected_frames)
       self.assertEqual(controller.angle_driver_override_ramp_total_frames, expected_frames)
+
+  def test_angle_driver_override_resume_softness_profiles_map_to_expected_exponents(self):
+    expected_exponents = {
+      0: 1.0,
+      1: 1.25,
+      2: 1.5,
+      3: 2.0,
+      4: 2.5,
+      5: 3.0,
+      6: 3.5,
+    }
+
+    for softness_setting, expected_exponent in expected_exponents.items():
+      controller = self._build_controller()
+      cc = self._build_cc(True, True, 14.0)
+
+      self._prime_angle_driver_override_ramp(controller, cc, softness_setting=softness_setting)
+
+      self.assertAlmostEqual(controller.angle_driver_override_ramp_softness_exponent, expected_exponent)
 
   def test_angle_driver_override_ramp_progresses_monotonically_toward_live_target_in_mads_only(self):
     controller = self._build_controller()
@@ -211,20 +233,26 @@ class TestSubaruCarController(unittest.TestCase):
     cc = self._build_cc(True, True, 14.0)
 
     standard_controller = self._build_controller()
-    softest_controller = self._build_controller()
+    extra_soft_controller = self._build_controller()
+    max_soft_controller = self._build_controller()
 
     standard_released_cs = self._prime_angle_driver_override_ramp(standard_controller, cc, softness_setting=0)
-    softest_released_cs = self._prime_angle_driver_override_ramp(softest_controller, cc, softness_setting=4)
+    extra_soft_released_cs = self._prime_angle_driver_override_ramp(extra_soft_controller, cc, softness_setting=4)
+    max_soft_released_cs = self._prime_angle_driver_override_ramp(max_soft_controller, cc, softness_setting=6)
 
     standard_controller.handle_angle_lateral(cc, standard_released_cs)
-    softest_controller.handle_angle_lateral(cc, softest_released_cs)
+    extra_soft_controller.handle_angle_lateral(cc, extra_soft_released_cs)
+    max_soft_controller.handle_angle_lateral(cc, max_soft_released_cs)
 
     standard_delta = standard_controller.apply_angle_last - standard_released_cs.out.steeringAngleDeg
-    softest_delta = softest_controller.apply_angle_last - softest_released_cs.out.steeringAngleDeg
+    extra_soft_delta = extra_soft_controller.apply_angle_last - extra_soft_released_cs.out.steeringAngleDeg
+    max_soft_delta = max_soft_controller.apply_angle_last - max_soft_released_cs.out.steeringAngleDeg
 
     self.assertGreater(standard_delta, 0.0)
-    self.assertGreater(softest_delta, 0.0)
-    self.assertLess(softest_delta, standard_delta)
+    self.assertGreater(extra_soft_delta, 0.0)
+    self.assertGreater(max_soft_delta, 0.0)
+    self.assertLess(extra_soft_delta, standard_delta)
+    self.assertLess(max_soft_delta, extra_soft_delta)
 
   def test_angle_driver_override_ramp_cancels_when_driver_input_returns(self):
     controller = self._build_controller()
