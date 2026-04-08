@@ -39,26 +39,25 @@ def test_carstate_publishes_subaru_cluster_speed_for_ui_toggle():
   assert 'ret.vEgoCluster = cluster_speed_kph * CV.KPH_TO_MS' in source
 
 
-def test_carcontroller_request_logs_include_target_and_handoff_context():
+def test_carcontroller_request_logs_include_target_and_basic_state_context():
   source = _read(CARCONTROLLER)
   assert 'angle LKAS request={lkas_request} inhibit={inhibit_reason} target={steer_target:.2f}' in source
   assert 'lastApplied={self.apply_angle_last:.2f}' in source
   assert 'measuredAngle={CS.out.steeringAngleDeg:.2f}' in source
   assert 'measuredRate={CS.out.steeringRateDeg:.2f}' in source
-  assert 'handoffActive={handoff_active}' in source
-  assert 'rampActive={manual_override_ramp_active}' in source
+  assert 'latActive={CC.latActive} enabled={CC.enabled}' in source
 
 
-def test_carcontroller_logs_neutral_angle_driver_override_state():
+def test_carcontroller_logs_center_damping_state_but_no_manual_override_reclaim_state():
   source = _read(CARCONTROLLER)
-  assert 'angle driver override hold active={self.angle_driver_override_hold_frames > 0}' in source
-  assert 'angle driver override ramp active={manual_override_ramp_active}' in source
-  assert 'MCSubaruManualYieldResumeSpeed' in source
-  assert 'MCSubaruManualYieldResumeSoftness' in source
-  assert 'totalFrames={self.angle_driver_override_ramp_total_frames}' in source
-  assert 'softnessExponent={self.angle_driver_override_ramp_softness_exponent:.2f}' in source
-  assert 'MADS manual override hold active=' not in source
-  assert 'MADS manual override ramp active=' not in source
+  assert 'angle LKAS low-speed center damping active={center_damping_active}' in source
+  assert 'angle LKAS center sign-flip clamp active={sign_flip_clamped}' in source
+  assert 'angle driver override hold active=' not in source
+  assert 'angle driver override ramp active=' not in source
+  assert 'MCSubaruManualYieldResumeSpeed' not in source
+  assert 'MCSubaruManualYieldResumeSoftness' not in source
+  assert 'handoffActive={handoff_active}' not in source
+  assert 'rampActive={manual_override_ramp_active}' not in source
 
 
 def test_carcontroller_no_longer_reads_chatter_toggle_param():

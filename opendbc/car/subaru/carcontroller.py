@@ -3,7 +3,7 @@ from openpilot.common.params import Params
 from opendbc.can import CANPacker
 from opendbc.car import Bus, make_tester_present_msg, structs
 from opendbc.car.carlog import carlog
-from opendbc.car.lateral import apply_center_deadzone, apply_driver_steer_torque_limits, apply_std_steer_angle_limits, common_fault_avoidance
+from opendbc.car.lateral import apply_driver_steer_torque_limits, apply_std_steer_angle_limits, common_fault_avoidance
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.subaru import subarucan
 from opendbc.car.subaru.values import DBC, GLOBAL_ES_ADDR, CanBus, CarControllerParams, SubaruFlags
@@ -16,19 +16,21 @@ MAX_STEER_RATE = 25  # deg/s
 MAX_STEER_RATE_FRAMES = 7  # tx control frames needed before torque can be cut
 MADS_ONLY_MIN_SPEED = 0.44704  # m/s (1 mph)
 MADS_ONLY_MAX_STEER_ANGLE = 120.0  # deg
-ANGLE_DRIVER_OVERRIDE_HOLD_FRAMES = 10  # steering command frames (~200 ms with STEER_STEP=2)
-ANGLE_DRIVER_OVERRIDE_RAMP_SPEED_MIN = 0
-ANGLE_DRIVER_OVERRIDE_RAMP_SPEED_MAX = 6
-ANGLE_DRIVER_OVERRIDE_RAMP_SPEED_DEFAULT = 4
-ANGLE_DRIVER_OVERRIDE_RAMP_FRAMES = 36  # default Slow ramp (steering command frames, ~720 ms with STEER_STEP=2)
-ANGLE_DRIVER_OVERRIDE_RAMP_FRAME_OPTIONS = [12, 18, 24, 30, 36, 42, 48]
-ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_MIN = 0
-ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_MAX = 6
-ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_DEFAULT = 4
-ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_EXPONENTS = [1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 3.5]
 LOW_SPEED_SMOOTH_MAX_SPEED = 4.4704  # m/s (10 mph)
 LOW_SPEED_SMOOTH_DEADBAND_MAX = 0.8  # deg at 0 mph
 LOW_SPEED_SMOOTH_ALPHA_MIN = 0.35  # blend factor at 0 mph
+# Soft-capture engage blending (subi-staging experiment only)
+# Maps UI level 0 (off) / 1-5 to (ramp_frames, alpha_start) pairs.
+# Level 5 is the most damped (longest ramp, gentlest start).
+SOFT_CAPTURE_LEVEL_PARAMS = [
+  # (ramp_frames, alpha_start)
+  (0, 1.0),    # 0 - disabled (instant snap, stock behavior)
+  (15, 0.25),  # 1 - light
+  (22, 0.15),  # 2 - mild
+  (30, 0.08),  # 3 - medium
+  (40, 0.05),  # 4 - strong
+  (50, 0.02),  # 5 - max
+]
 SUBARU_TUNING_STRENGTH_MIN = -3
 SUBARU_TUNING_STRENGTH_MAX = 4
 SUBARU_TUNING_SCALE_POINTS = [SUBARU_TUNING_STRENGTH_MIN, 0, 3, SUBARU_TUNING_STRENGTH_MAX]
@@ -37,10 +39,6 @@ SUBARU_SMOOTHING_ALPHA_SCALES = [1.20, 1.00, 0.80, 0.734]
 SUBARU_CENTER_DAMPING_DEADBAND_SCALES = [0.70, 1.00, 1.45, 1.60]
 SUBARU_CENTER_DAMPING_SIGN_FLIP_SCALES = [1.30, 1.00, 0.70, 0.60]
 SUBARU_CENTER_DAMPING_ALPHA_SCALES = [1.20, 1.00, 0.75, 0.666]
-LOW_SPEED_DELTA_DEADZONE_TARGET_MAX = 4.0  # deg, keep the experiment scoped near center
-LOW_SPEED_DELTA_DEADZONE_STEER_MAX = 10.0  # deg, bypass real low-speed turns
-LOW_SPEED_DELTA_DEADZONE_MAX = 2.0  # deg at 0 mph
-LOW_SPEED_DELTA_DEADZONE_MIN = 0.75  # deg at 10 mph
 LOW_SPEED_CENTER_DAMPING_TARGET_MAX = 3.0  # deg, only damp tiny near-center requests
 LOW_SPEED_CENTER_DAMPING_STEER_MAX = 8.0  # deg, avoid muting real turns
 LOW_SPEED_CENTER_DAMPING_DEADBAND_MAX = 0.8  # deg at 0 mph
@@ -49,23 +47,6 @@ LOW_SPEED_CENTER_DAMPING_SIGN_FLIP_DELTA_MIN = 0.2  # deg/frame at 0 mph
 LOW_SPEED_CENTER_DAMPING_SIGN_FLIP_DELTA_MAX = 0.75  # deg/frame at 10 mph
 LOW_SPEED_CENTER_DAMPING_ALPHA_MIN = 0.25  # first-order blend factor at 0 mph
 LOW_SPEED_CENTER_DAMPING_ALPHA_MAX = 0.65  # first-order blend factor at 10 mph
-LOW_SPEED_STRAIGHT_STABILITY_TARGET_MAX = 3.5  # deg, keep narrowly scoped to straight-ahead chatter
-LOW_SPEED_STRAIGHT_STABILITY_STEER_MAX = 6.0  # deg, bypass real turning maneuvers
-LOW_SPEED_STRAIGHT_CENTER_HOLD_TARGET_MAX = 1.0  # deg, hold near-center targets steady
-LOW_SPEED_STRAIGHT_CENTER_HOLD_STEER_MAX = 2.5  # deg, measured wheel angle window for center hold
-LOW_SPEED_STRAIGHT_SIGN_RELEASE_TARGET = 2.0  # deg, allow small opposite-sign moves only after persistence
-LOW_SPEED_STRAIGHT_SIGN_RELEASE_FRAMES = 5  # 50 ms at 100 Hz
-LOW_SPEED_STRAIGHT_SIGN_EPSILON = 0.05  # deg, ignore numerical noise around zero
-# Soft-capture engage blending (subi-staging experiment only)
-# Maps UI level 0 (off) / 1-5 to (ramp_frames, alpha_start) pairs.
-SOFT_CAPTURE_LEVEL_PARAMS = [
-  (0, 1.0),   # 0 - disabled (instant snap, stock behavior)
-  (15, 0.25),  # 1 - light
-  (22, 0.15),  # 2 - mild
-  (30, 0.08),  # 3 - medium
-  (40, 0.05),  # 4 - strong
-  (50, 0.02),  # 5 - max
-]
 
 
 class CarController(CarControllerBase, SnGCarController):
@@ -84,18 +65,10 @@ class CarController(CarControllerBase, SnGCarController):
     self.params = Params()
     self.mc_subaru_smoothing_tune = False
     self.mc_subaru_smoothing_strength = 0
+    self.mc_subaru_center_damping_tune = False
     self.mc_subaru_center_damping_strength = 0
-    self.mc_subaru_manual_yield_resume_speed = ANGLE_DRIVER_OVERRIDE_RAMP_SPEED_DEFAULT
-    self.mc_subaru_manual_yield_resume_softness = ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_DEFAULT
     self.mc_subaru_soft_capture_enabled = False
-    self.mc_subaru_soft_capture_level = 3
-    self.angle_driver_override_hold_frames = 0
-    self.angle_driver_override_ramp_frames = 0
-    self.angle_driver_override_ramp_total_frames = ANGLE_DRIVER_OVERRIDE_RAMP_FRAMES
-    self.angle_driver_override_ramp_start_angle = 0.0
-    self.angle_driver_override_ramp_softness_exponent = ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_EXPONENTS[ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_DEFAULT]
-    self.low_speed_straight_pending_direction = 0
-    self.low_speed_straight_pending_frames = 0
+    self.mc_subaru_soft_capture_level = 1
     self.lat_active_prev = False
     self.soft_capture_frame = -(SOFT_CAPTURE_LEVEL_PARAMS[-1][0] + 1)
     self._update_params()
@@ -117,20 +90,12 @@ class CarController(CarControllerBase, SnGCarController):
     return float(np.interp(strength, SUBARU_TUNING_SCALE_POINTS, values))
 
   @staticmethod
-  def _get_resume_speed_frames(speed_setting: int) -> int:
-    return ANGLE_DRIVER_OVERRIDE_RAMP_FRAME_OPTIONS[int(np.clip(
-      speed_setting,
-      ANGLE_DRIVER_OVERRIDE_RAMP_SPEED_MIN,
-      ANGLE_DRIVER_OVERRIDE_RAMP_SPEED_MAX,
-    ))]
-
-  @staticmethod
-  def _get_resume_softness_exponent(softness_setting: int) -> float:
-    return ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_EXPONENTS[int(np.clip(
-      softness_setting,
-      ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_MIN,
-      ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_MAX,
-    ))]
+  def _angle_direction(angle: float) -> int:
+    if angle > 0.05:
+      return 1
+    if angle < -0.05:
+      return -1
+    return 0
 
   def _get_soft_capture_level(self) -> int:
     if not self.mc_subaru_soft_capture_enabled:
@@ -164,102 +129,34 @@ class CarController(CarControllerBase, SnGCarController):
       SUBARU_TUNING_STRENGTH_MIN,
       SUBARU_TUNING_STRENGTH_MAX,
     ))
+    self.mc_subaru_center_damping_tune = self.params.get_bool("MCSubaruCenterDampingTune")
     self.mc_subaru_center_damping_strength = int(np.clip(
       self._get_int_param("MCSubaruCenterDampingStrength"),
       SUBARU_TUNING_STRENGTH_MIN,
       SUBARU_TUNING_STRENGTH_MAX,
     ))
-    self.mc_subaru_manual_yield_resume_speed = int(np.clip(
-      self._get_int_param("MCSubaruManualYieldResumeSpeed", ANGLE_DRIVER_OVERRIDE_RAMP_SPEED_DEFAULT),
-      ANGLE_DRIVER_OVERRIDE_RAMP_SPEED_MIN,
-      ANGLE_DRIVER_OVERRIDE_RAMP_SPEED_MAX,
-    ))
-    self.mc_subaru_manual_yield_resume_softness = int(np.clip(
-      self._get_int_param("MCSubaruManualYieldResumeSoftness", ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_DEFAULT),
-      ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_MIN,
-      ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_MAX,
-    ))
     self.mc_subaru_soft_capture_enabled = self.params.get_bool("MCSubaruSoftCaptureEnabled")
     self.mc_subaru_soft_capture_level = int(np.clip(
-      self._get_int_param("MCSubaruSoftCaptureLevel", 3),
+      self._get_int_param("MCSubaruSoftCaptureLevel", 1),
       1,
       len(SOFT_CAPTURE_LEVEL_PARAMS) - 1,
     ))
 
-  def _reset_angle_driver_override_ramp(self):
-    self.angle_driver_override_ramp_frames = 0
-    self.angle_driver_override_ramp_total_frames = ANGLE_DRIVER_OVERRIDE_RAMP_FRAMES
-    self.angle_driver_override_ramp_start_angle = 0.0
-    self.angle_driver_override_ramp_softness_exponent = ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_EXPONENTS[ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_DEFAULT]
-
-  def _reset_angle_driver_override_state(self):
-    self.angle_driver_override_hold_frames = 0
-    self._reset_angle_driver_override_ramp()
-
-  def _start_angle_driver_override_ramp(self, measured_angle: float):
-    ramp_frames = self._get_resume_speed_frames(self.mc_subaru_manual_yield_resume_speed)
-    self.angle_driver_override_ramp_frames = ramp_frames
-    self.angle_driver_override_ramp_total_frames = ramp_frames
-    self.angle_driver_override_ramp_start_angle = measured_angle
-    self.angle_driver_override_ramp_softness_exponent = self._get_resume_softness_exponent(
-      self.mc_subaru_manual_yield_resume_softness
-    )
-
-  def _update_angle_driver_override_state(self, steering_pressed: bool, lkas_allowed: bool) -> tuple[bool, bool]:
-    if not lkas_allowed:
-      self._reset_angle_driver_override_state()
-      return False, False
-
-    if steering_pressed:
-      self.angle_driver_override_hold_frames = ANGLE_DRIVER_OVERRIDE_HOLD_FRAMES
-      self._reset_angle_driver_override_ramp()
-      return True, False
-
-    if self.angle_driver_override_hold_frames > 0:
-      self.angle_driver_override_hold_frames -= 1
-      if self.angle_driver_override_hold_frames == 0:
-        return True, True
-      return True, False
-
-    return False, False
-
-  def _apply_angle_driver_override_ramp(self, live_steer_target: float) -> tuple[float, bool]:
-    if self.angle_driver_override_ramp_frames <= 0:
-      return live_steer_target, False
-
-    progress = (self.angle_driver_override_ramp_total_frames - self.angle_driver_override_ramp_frames + 1) / \
-      self.angle_driver_override_ramp_total_frames
-    eased_progress = progress ** self.angle_driver_override_ramp_softness_exponent
-    ramped_target = self.angle_driver_override_ramp_start_angle + eased_progress * (
-      live_steer_target - self.angle_driver_override_ramp_start_angle
-    )
-
-    self.angle_driver_override_ramp_frames -= 1
-    if self.angle_driver_override_ramp_frames <= 0:
-      self._reset_angle_driver_override_ramp()
-
-    return ramped_target, True
-
-  def _get_angle_lkas_target(self, raw_target: float, CS, capture_lkas_target: bool) -> tuple[float, bool, float, bool, bool]:
-    if capture_lkas_target and CS.out.vEgoRaw < LOW_SPEED_SMOOTH_MAX_SPEED:
-      # Keep the existing MC low-speed stack intact, with the Lukas-inspired
-      # near-center delta deadzone now enabled by default.
+  def _get_angle_lkas_target(self, raw_target: float, CS, lkas_request: bool) -> tuple[float, bool, bool]:
+    if lkas_request and CS.out.vEgoRaw < LOW_SPEED_SMOOTH_MAX_SPEED:
       steer_target = self._get_low_speed_smoothed_angle_target(raw_target, CS.out.vEgoRaw)
-      steer_target, delta_deadzone_active, delta_deadzone = self._get_low_speed_delta_deadzone_target(steer_target, CS, capture_lkas_target)
-      steer_target = self._get_low_speed_stable_angle_target(steer_target, CS)
       steer_target, center_damping_active, sign_flip_clamped = self._get_low_speed_center_damped_angle_target(steer_target, CS)
-      return steer_target, delta_deadzone_active, delta_deadzone, center_damping_active, sign_flip_clamped
+      return steer_target, center_damping_active, sign_flip_clamped
 
-    self._reset_low_speed_straight_stability()
-    return raw_target, False, 0.0, False, False
+    return raw_target, False, False
 
   def _get_low_speed_smoothed_angle_target(self, raw_target, v_ego):
+    if not self.mc_subaru_smoothing_tune or v_ego >= LOW_SPEED_SMOOTH_MAX_SPEED:
+      return raw_target
+
     speed_factor = np.clip(v_ego / LOW_SPEED_SMOOTH_MAX_SPEED, 0.0, 1.0)
-    deadband_scale = 1.0
-    alpha_scale = 1.0
-    if self.mc_subaru_smoothing_tune:
-      deadband_scale = self._get_strength_scale(self.mc_subaru_smoothing_strength, SUBARU_SMOOTHING_DEADBAND_SCALES)
-      alpha_scale = self._get_strength_scale(self.mc_subaru_smoothing_strength, SUBARU_SMOOTHING_ALPHA_SCALES)
+    deadband_scale = self._get_strength_scale(self.mc_subaru_smoothing_strength, SUBARU_SMOOTHING_DEADBAND_SCALES)
+    alpha_scale = self._get_strength_scale(self.mc_subaru_smoothing_strength, SUBARU_SMOOTHING_ALPHA_SCALES)
 
     deadband = (1.0 - speed_factor) * LOW_SPEED_SMOOTH_DEADBAND_MAX * deadband_scale
     delta = raw_target - self.apply_angle_last
@@ -272,92 +169,18 @@ class CarController(CarControllerBase, SnGCarController):
     alpha = float(np.clip(alpha * alpha_scale, 0.15, 1.0))
     return self.apply_angle_last + alpha * delta
 
-  def _reset_low_speed_straight_stability(self):
-    self.low_speed_straight_pending_direction = 0
-    self.low_speed_straight_pending_frames = 0
-
-  @staticmethod
-  def _angle_direction(angle: float) -> int:
-    if angle > LOW_SPEED_STRAIGHT_SIGN_EPSILON:
-      return 1
-    if angle < -LOW_SPEED_STRAIGHT_SIGN_EPSILON:
-      return -1
-    return 0
-
-  def _get_low_speed_stable_angle_target(self, raw_target: float, CS) -> float:
-    if CS.out.vEgoRaw >= LOW_SPEED_SMOOTH_MAX_SPEED or CS.out.standstill or CS.out.steeringPressed:
-      self._reset_low_speed_straight_stability()
-      return raw_target
-
-    measured_angle = CS.out.steeringAngleDeg
-    if abs(raw_target) > LOW_SPEED_STRAIGHT_STABILITY_TARGET_MAX or \
-       abs(measured_angle) > LOW_SPEED_STRAIGHT_STABILITY_STEER_MAX or \
-       abs(self.apply_angle_last) > LOW_SPEED_STRAIGHT_STABILITY_STEER_MAX:
-      self._reset_low_speed_straight_stability()
-      return raw_target
-
-    if abs(raw_target) <= LOW_SPEED_STRAIGHT_CENTER_HOLD_TARGET_MAX and \
-       abs(measured_angle) <= LOW_SPEED_STRAIGHT_CENTER_HOLD_STEER_MAX:
-      self._reset_low_speed_straight_stability()
-      return 0.0
-
-    target_direction = self._angle_direction(raw_target)
-    current_direction = self._angle_direction(self.apply_angle_last)
-    if target_direction == 0:
-      self._reset_low_speed_straight_stability()
-      return 0.0
-
-    needs_release = abs(raw_target) < LOW_SPEED_STRAIGHT_SIGN_RELEASE_TARGET and \
-      (current_direction == 0 or current_direction != target_direction)
-    if not needs_release:
-      self._reset_low_speed_straight_stability()
-      return raw_target
-
-    if self.low_speed_straight_pending_direction != target_direction:
-      self.low_speed_straight_pending_direction = target_direction
-      self.low_speed_straight_pending_frames = 1
-    else:
-      self.low_speed_straight_pending_frames += 1
-
-    if self.low_speed_straight_pending_frames < LOW_SPEED_STRAIGHT_SIGN_RELEASE_FRAMES:
-      return 0.0 if current_direction == 0 else self.apply_angle_last
-
-    self._reset_low_speed_straight_stability()
-    return raw_target
-
-  def _get_low_speed_delta_deadzone_target(self, raw_target: float, CS, lkas_request: bool):
-    deadzone_active = lkas_request and \
-      CS.out.vEgoRaw < LOW_SPEED_SMOOTH_MAX_SPEED and \
-      not CS.out.standstill and not CS.out.steeringPressed and \
-      abs(raw_target) <= LOW_SPEED_DELTA_DEADZONE_TARGET_MAX and \
-      abs(CS.out.steeringAngleDeg) <= LOW_SPEED_DELTA_DEADZONE_STEER_MAX
-    if not deadzone_active:
-      return raw_target, False, 0.0
-
-    delta = raw_target - self.apply_angle_last
-    deadzone = float(np.interp(
-      CS.out.vEgoRaw,
-      [0.0, LOW_SPEED_SMOOTH_MAX_SPEED],
-      [LOW_SPEED_DELTA_DEADZONE_MAX, LOW_SPEED_DELTA_DEADZONE_MIN],
-    ))
-    filtered_target = self.apply_angle_last + apply_center_deadzone(delta, deadzone)
-    return filtered_target, True, deadzone
-
   def _get_low_speed_center_damped_angle_target(self, raw_target: float, CS):
-    center_damping_active = CS.out.vEgoRaw < LOW_SPEED_SMOOTH_MAX_SPEED and \
+    center_damping_active = self.mc_subaru_center_damping_tune and \
+      CS.out.vEgoRaw < LOW_SPEED_SMOOTH_MAX_SPEED and \
       not CS.out.standstill and not CS.out.steeringPressed and \
       abs(raw_target) <= LOW_SPEED_CENTER_DAMPING_TARGET_MAX and \
       abs(CS.out.steeringAngleDeg) <= LOW_SPEED_CENTER_DAMPING_STEER_MAX
     if not center_damping_active:
       return raw_target, False, False
 
-    deadband_scale = 1.0
-    max_delta_scale = 1.0
-    alpha_scale = 1.0
-    if self.mc_subaru_smoothing_tune:
-      deadband_scale = self._get_strength_scale(self.mc_subaru_center_damping_strength, SUBARU_CENTER_DAMPING_DEADBAND_SCALES)
-      max_delta_scale = self._get_strength_scale(self.mc_subaru_center_damping_strength, SUBARU_CENTER_DAMPING_SIGN_FLIP_SCALES)
-      alpha_scale = self._get_strength_scale(self.mc_subaru_center_damping_strength, SUBARU_CENTER_DAMPING_ALPHA_SCALES)
+    deadband_scale = self._get_strength_scale(self.mc_subaru_center_damping_strength, SUBARU_CENTER_DAMPING_DEADBAND_SCALES)
+    max_delta_scale = self._get_strength_scale(self.mc_subaru_center_damping_strength, SUBARU_CENTER_DAMPING_SIGN_FLIP_SCALES)
+    alpha_scale = self._get_strength_scale(self.mc_subaru_center_damping_strength, SUBARU_CENTER_DAMPING_ALPHA_SCALES)
 
     deadband = np.interp(
       CS.out.vEgoRaw,
@@ -397,17 +220,12 @@ class CarController(CarControllerBase, SnGCarController):
     mads_only_ok = CS.out.vEgoRaw > MADS_ONLY_MIN_SPEED and abs(CS.out.steeringAngleDeg) < MADS_ONLY_MAX_STEER_ANGLE
     lkas_allowed = CC.latActive and (CC.enabled or not mads_only or mads_only_ok) and \
       CS.out.gearShifter == structs.CarState.GearShifter.drive and not CS.out.standstill
-    angle_driver_override, ramp_will_start = self._update_angle_driver_override_state(
-      CS.out.steeringPressed,
-      lkas_allowed,
-    )
-    lkas_request = lkas_allowed and not angle_driver_override
-    capture_lkas_target = lkas_request or ramp_will_start
+    lkas_request = lkas_allowed and not CS.out.steeringPressed
 
     inhibit_reason = "none"
     if not CC.latActive:
       inhibit_reason = "lat_inactive"
-    elif angle_driver_override:
+    elif CS.out.steeringPressed:
       inhibit_reason = "manual_override"
     elif CS.out.gearShifter != structs.CarState.GearShifter.drive:
       inhibit_reason = "gear_not_drive"
@@ -417,45 +235,19 @@ class CarController(CarControllerBase, SnGCarController):
       inhibit_reason = "mads_below_min_speed" if CS.out.vEgoRaw <= MADS_ONLY_MIN_SPEED else "mads_angle_limit"
 
     self._log_transition("angle_lkas_inhibit", inhibit_reason, f"angle LKAS inhibit={inhibit_reason}")
-    self._log_transition(
-      "angle_driver_override_hold",
-      self.angle_driver_override_hold_frames > 0,
-      (
-        f"angle driver override hold active={self.angle_driver_override_hold_frames > 0} "
-        + f"frames={self.angle_driver_override_hold_frames} steeringPressed={CS.out.steeringPressed}"
-      ),
+
+    steer_target, center_damping_active, sign_flip_clamped = self._get_angle_lkas_target(
+      CC.actuators.steeringAngleDeg,
+      CS,
+      lkas_request,
     )
-
-    steer_target, delta_deadzone_active, delta_deadzone, center_damping_active, sign_flip_clamped = \
-      self._get_angle_lkas_target(CC.actuators.steeringAngleDeg, CS, capture_lkas_target)
-
-    if ramp_will_start:
-      self._start_angle_driver_override_ramp(CS.out.steeringAngleDeg)
-
-    if lkas_request:
-      steer_target, manual_override_ramp_active = self._apply_angle_driver_override_ramp(steer_target)
-    else:
-      manual_override_ramp_active = False
-
-    handoff_active = angle_driver_override or ramp_will_start or manual_override_ramp_active
     self._log_transition(
       "angle_lkas_request",
       lkas_request,
       (
         f"angle LKAS request={lkas_request} inhibit={inhibit_reason} target={steer_target:.2f} "
         + f"lastApplied={self.apply_angle_last:.2f} measuredAngle={CS.out.steeringAngleDeg:.2f} "
-        + f"measuredRate={CS.out.steeringRateDeg:.2f} handoffActive={handoff_active} "
-        + f"rampActive={manual_override_ramp_active} latActive={CC.latActive} enabled={CC.enabled}"
-      ),
-    )
-
-    self._log_transition(
-      "angle_lkas_delta_deadzone",
-      delta_deadzone_active,
-      (
-        f"angle LKAS delta deadzone active={delta_deadzone_active} "
-        + f"deadzone={delta_deadzone:.2f} target={steer_target:.2f} last={self.apply_angle_last:.2f} "
-        + f"vEgo={CS.out.vEgoRaw:.2f} steeringAngle={CS.out.steeringAngleDeg:.2f}"
+        + f"measuredRate={CS.out.steeringRateDeg:.2f} latActive={CC.latActive} enabled={CC.enabled}"
       ),
     )
     self._log_transition(
@@ -472,17 +264,6 @@ class CarController(CarControllerBase, SnGCarController):
       (
         f"angle LKAS center sign-flip clamp active={sign_flip_clamped} "
         + f"target={steer_target:.2f} last={self.apply_angle_last:.2f} vEgo={CS.out.vEgoRaw:.2f}"
-      ),
-    )
-    self._log_transition(
-      "angle_driver_override_ramp",
-      manual_override_ramp_active,
-      (
-        f"angle driver override ramp active={manual_override_ramp_active} "
-        + f"framesRemaining={self.angle_driver_override_ramp_frames} totalFrames={self.angle_driver_override_ramp_total_frames} "
-        + f"softnessExponent={self.angle_driver_override_ramp_softness_exponent:.2f} "
-        + f"start={self.angle_driver_override_ramp_start_angle:.2f} "
-        + f"steerTarget={steer_target:.2f}"
       ),
     )
 
