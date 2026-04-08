@@ -14,6 +14,7 @@ from opendbc.car.subaru.carcontroller import (
   LOW_SPEED_SMOOTH_MAX_SPEED,
   MADS_ONLY_MIN_SPEED,
   LOW_SPEED_STRAIGHT_SIGN_RELEASE_FRAMES,
+  SOFT_CAPTURE_LEVEL_PARAMS,
   SUBARU_CENTER_DAMPING_ALPHA_SCALES,
   SUBARU_CENTER_DAMPING_DEADBAND_SCALES,
   SUBARU_CENTER_DAMPING_SIGN_FLIP_SCALES,
@@ -34,6 +35,8 @@ class TestSubaruCarController(unittest.TestCase):
     "MCSubaruCenterDampingStrength",
     "MCSubaruManualYieldResumeSpeed",
     "MCSubaruManualYieldResumeSoftness",
+    "MCSubaruSoftCaptureEnabled",
+    "MCSubaruSoftCaptureLevel",
   )
 
   def setUp(self):
@@ -64,7 +67,9 @@ class TestSubaruCarController(unittest.TestCase):
       actuators=SimpleNamespace(steeringAngleDeg=steering_angle_deg),
     )
 
-  def _build_controller(self):
+  def _build_controller(self, *, soft_capture_enabled=False, soft_capture_level=3):
+    self.params.put_bool("MCSubaruSoftCaptureEnabled", soft_capture_enabled)
+    self.params.put("MCSubaruSoftCaptureLevel", str(soft_capture_level))
     CP = CarInterface.get_non_essential_params(CAR.SUBARU_OUTBACK_2023)
     CP_SP = CarInterface.get_non_essential_params_sp(CP, CAR.SUBARU_OUTBACK_2023)
     return CarController({}, CP, CP_SP)
@@ -210,7 +215,7 @@ class TestSubaruCarController(unittest.TestCase):
       controller.handle_angle_lateral(cc, cs_released)
       ramped_angles.append(controller.apply_angle_last)
 
-    self.assertTrue(all(left <= right for left, right in zip(ramped_angles, ramped_angles[1:])))
+    self.assertTrue(all(left <= right for left, right in zip(ramped_angles, ramped_angles[1:], strict=True)))
     self.assertGreater(ramped_angles[-1], cs_released.out.steeringAngleDeg)
     self.assertLessEqual(ramped_angles[-1], cc.actuators.steeringAngleDeg)
 
@@ -225,7 +230,7 @@ class TestSubaruCarController(unittest.TestCase):
       controller.handle_angle_lateral(cc_changed, cs_released)
       ramped_angles.append(controller.apply_angle_last)
 
-    self.assertTrue(all(left <= right for left, right in zip(ramped_angles, ramped_angles[1:])))
+    self.assertTrue(all(left <= right for left, right in zip(ramped_angles, ramped_angles[1:], strict=True)))
     self.assertGreater(ramped_angles[-1], 14.0)
     self.assertLessEqual(ramped_angles[-1], cc_changed.actuators.steeringAngleDeg)
 
@@ -270,6 +275,71 @@ class TestSubaruCarController(unittest.TestCase):
     self.assertEqual(controller.angle_driver_override_hold_frames, ANGLE_DRIVER_OVERRIDE_HOLD_FRAMES)
     self.assertEqual(controller.angle_driver_override_ramp_frames, 0)
     self.assertAlmostEqual(controller.apply_angle_last, cs_pressed.out.steeringAngleDeg)
+
+  def test_soft_capture_disabled_is_a_no_op(self):
+    controller = self._build_controller(soft_capture_enabled=False, soft_capture_level=5)
+    controller.soft_capture_frame = controller.frame
+
+    self.assertEqual(controller._get_soft_capture_level(), 0)
+    self.assertAlmostEqual(controller._get_soft_capture_angle(18.0, 10.0), 18.0)
+
+  def test_soft_capture_engage_edge_starts_ramp_and_reduces_first_reclaim_step(self):
+    baseline = self._build_controller(soft_capture_enabled=False)
+    softened = self._build_controller(soft_capture_enabled=True, soft_capture_level=3)
+    cc = self._build_cc(True, True, 14.0)
+    cs = self._build_cs(8.0, 10.0)
+
+    baseline.apply_angle_last = cs.out.steeringAngleDeg
+    softened.apply_angle_last = cs.out.steeringAngleDeg
+
+    baseline.handle_angle_lateral(cc, cs)
+    softened.handle_angle_lateral(cc, cs)
+
+    self.assertEqual(softened.soft_capture_frame, 0)
+    self.assertTrue(softened.lat_active_prev)
+    self.assertLess(softened.apply_angle_last, baseline.apply_angle_last)
+
+  def test_soft_capture_higher_levels_reduce_the_initial_blend_delta(self):
+    light = self._build_controller(soft_capture_enabled=True, soft_capture_level=1)
+    medium = self._build_controller(soft_capture_enabled=True, soft_capture_level=3)
+    maximum = self._build_controller(soft_capture_enabled=True, soft_capture_level=5)
+
+    for controller in (light, medium, maximum):
+      controller.soft_capture_frame = 0
+      controller.frame = 0
+
+    model_target = 20.0
+    wheel_angle = 10.0
+    light_delta = light._get_soft_capture_angle(model_target, wheel_angle) - wheel_angle
+    medium_delta = medium._get_soft_capture_angle(model_target, wheel_angle) - wheel_angle
+    max_delta = maximum._get_soft_capture_angle(model_target, wheel_angle) - wheel_angle
+
+    self.assertGreater(light_delta, medium_delta)
+    self.assertGreater(medium_delta, max_delta)
+
+  def test_soft_capture_ramp_completes_and_returns_full_model_control(self):
+    controller = self._build_controller(soft_capture_enabled=True, soft_capture_level=3)
+    ramp_frames, _ = SOFT_CAPTURE_LEVEL_PARAMS[3]
+    controller.soft_capture_frame = 0
+    controller.frame = ramp_frames
+
+    self.assertAlmostEqual(controller._get_soft_capture_angle(18.0, 10.0), 18.0)
+
+  def test_soft_capture_does_not_stack_on_manual_override_reclaim(self):
+    baseline = self._build_controller(soft_capture_enabled=False)
+    softened = self._build_controller(soft_capture_enabled=True, soft_capture_level=5)
+    cc = self._build_cc(True, True, 14.0)
+
+    baseline_released_cs = self._prime_angle_driver_override_ramp(baseline, cc)
+    softened_released_cs = self._prime_angle_driver_override_ramp(softened, cc)
+
+    self.assertEqual(softened.soft_capture_frame, -(SOFT_CAPTURE_LEVEL_PARAMS[-1][0] + 1))
+
+    baseline.handle_angle_lateral(cc, baseline_released_cs)
+    softened.handle_angle_lateral(cc, softened_released_cs)
+
+    self.assertAlmostEqual(softened.apply_angle_last, baseline.apply_angle_last)
+    self.assertEqual(softened.soft_capture_frame, -(SOFT_CAPTURE_LEVEL_PARAMS[-1][0] + 1))
 
   def test_mads_only_below_one_mph_still_inhibits_angle_lkas(self):
     controller = self._build_controller()
@@ -404,7 +474,7 @@ class TestSubaruCarController(unittest.TestCase):
       damped_targets.append(damped_target)
       controller.apply_angle_last = damped_target
 
-    self.assertTrue(all(left < right for left, right in zip(damped_targets, damped_targets[1:])))
+    self.assertTrue(all(left < right for left, right in zip(damped_targets, damped_targets[1:], strict=True)))
     self.assertGreater(damped_targets[-1], 1.0)
 
   def test_low_speed_center_damping_bypasses_real_turn_requests(self):
