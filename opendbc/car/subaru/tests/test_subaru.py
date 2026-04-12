@@ -1,4 +1,5 @@
 from opendbc.car import gen_empty_fingerprint
+from opendbc.car.interfaces import get_torque_params
 from opendbc.car.structs import CarParams
 from opendbc.car.subaru.fingerprints import FW_VERSIONS
 from opendbc.car.subaru.interface import CarInterface
@@ -51,6 +52,12 @@ class TestSubaruFingerprint:
 
     assert b'\x05!\x08\x1dK\x00\x00\x00\x00\x00' in fws[(Ecu.fwdCamera, 0x787, None)]
 
+  def test_crosstrek_angle_platforms_have_torque_metadata(self):
+    torque_params = get_torque_params()
+
+    for candidate in (CAR.SUBARU_CROSSTREK_2024, CAR.SUBARU_CROSSTREK_2025):
+      assert torque_params[candidate]["MAX_LAT_ACCEL_MEASURED"] == 3.0
+
 
 class TestSubaruOutbackLongitudinalExperiment:
   @staticmethod
@@ -83,7 +90,12 @@ class TestSubaruOutbackLongitudinalExperiment:
       assert not (cp.safetyConfigs[0].safetyParam & SubaruSafetyFlags.LONG)
 
   def test_other_lkas_angle_subarus_with_params_remain_blocked(self):
-    for candidate in (CAR.SUBARU_FORESTER_2022, CAR.SUBARU_ASCENT_2023):
+    for candidate in (
+      CAR.SUBARU_FORESTER_2022,
+      CAR.SUBARU_ASCENT_2023,
+      CAR.SUBARU_CROSSTREK_2024,
+      CAR.SUBARU_CROSSTREK_2025,
+    ):
       cp = self._params(candidate, alpha_long=True)
 
       assert cp.flags & SubaruFlags.LKAS_ANGLE
