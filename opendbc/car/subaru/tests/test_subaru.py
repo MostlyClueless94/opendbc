@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from opendbc.car import gen_empty_fingerprint
 from opendbc.car.interfaces import get_torque_params
 from opendbc.car.structs import CarParams
@@ -7,6 +9,9 @@ from opendbc.car.subaru.values import CAR, SubaruFlags, SubaruSafetyFlags
 
 
 Ecu = CarParams.Ecu
+REPO_ROOT = Path(__file__).resolve().parents[5]
+SUBARU_CARSTATE = Path(__file__).resolve().parents[1] / "carstate.py"
+SERVICES = REPO_ROOT / "cereal/services.py"
 
 
 class TestSubaruFingerprint:
@@ -57,6 +62,17 @@ class TestSubaruFingerprint:
 
     for candidate in (CAR.SUBARU_CROSSTREK_2024, CAR.SUBARU_CROSSTREK_2025):
       assert torque_params[candidate]["MAX_LAT_ACCEL_MEASURED"] == 3.0
+
+
+class TestSubaruCarStateSchemaContract:
+  def test_subaru_carstate_does_not_publish_missing_carstatebp_service(self):
+    carstate_source = SUBARU_CARSTATE.read_text(encoding="utf-8")
+    services_source = SERVICES.read_text(encoding="utf-8")
+
+    if "carStateBP" not in services_source:
+      assert 'messaging.new_message("carStateBP")' not in carstate_source
+    assert "ret_sp.brakeLightsAvailable" in carstate_source
+    assert "ret_sp.brakeLightsOn" in carstate_source
 
 
 class TestSubaruOutbackLongitudinalExperiment:

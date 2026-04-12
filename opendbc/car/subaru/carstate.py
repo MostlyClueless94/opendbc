@@ -1,5 +1,4 @@
 import copy
-from cereal import messaging
 from openpilot.common.params import Params
 from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, structs
@@ -30,7 +29,6 @@ class CarState(CarStateBase, MadsCarState, SnGCarState):
 
     self.angle_rate_calulator = CanSignalRateCalculator(50)
     self._debug_state = {}
-    self.car_state_bp_msg = None
     self.params = Params()
     self.frame = 0
     self.mc_subaru_manual_yield_torque_threshold_enabled = False
@@ -260,7 +258,7 @@ class CarState(CarStateBase, MadsCarState, SnGCarState):
 
     MadsCarState.update_mads(self, ret, can_parsers)
     SnGCarState.update(self, ret, can_parsers)
-    self.car_state_bp_msg = self.update_car_state_bp(cp, cp_cam, cp_alt)
+    self.update_brake_light_status(ret_sp, cp, cp_cam, cp_alt)
 
     return ret, ret_sp
 
@@ -271,16 +269,12 @@ class CarState(CarStateBase, MadsCarState, SnGCarState):
     except (KeyError, AttributeError, TypeError):
       return False, False
 
-  def update_car_state_bp(self, cp, cp_cam, cp_alt):
-    dat = messaging.new_message("carStateBP")
-    dat.valid = True
-
-    brake_light_status = dat.carStateBP.brakeLightStatus
-    brake_light_status.dataAvailable = False
-    brake_light_status.brakeLightsOn = False
+  def update_brake_light_status(self, ret_sp, cp, cp_cam, cp_alt) -> None:
+    ret_sp.brakeLightsAvailable = False
+    ret_sp.brakeLightsOn = False
 
     if self.CP.flags & SubaruFlags.PREGLOBAL:
-      return dat
+      return
 
     cp_brakes = cp_alt if self.CP.flags & SubaruFlags.GLOBAL_GEN2 else cp
     cp_es_brake = cp_alt if self.CP.flags & SubaruFlags.GLOBAL_GEN2 else cp_cam
@@ -312,10 +306,8 @@ class CarState(CarStateBase, MadsCarState, SnGCarState):
         cruise_available = True
         cruise_brake_lights = cruise_brake_lights or value
 
-    brake_light_status.dataAvailable = driver_available or cruise_available
-    brake_light_status.brakeLightsOn = driver_brake_lights or cruise_brake_lights
-
-    return dat
+    ret_sp.brakeLightsAvailable = driver_available or cruise_available
+    ret_sp.brakeLightsOn = driver_brake_lights or cruise_brake_lights
 
   @staticmethod
   def get_can_parsers(CP, CP_SP):
