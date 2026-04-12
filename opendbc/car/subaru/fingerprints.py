@@ -42,6 +42,7 @@ FW_VERSIONS = {
       b'%\xc0\xd0\x11',
     ],
     (Ecu.fwdCamera, 0x787, None): [
+      b'\x05!\x08\x1dK\x00\x00\x00\x00\x00',
       b'\x05!\x08\x1dK\x05!\x08\x01/',
     ],
     (Ecu.engine, 0x7a2, None): [
@@ -251,6 +252,45 @@ FW_VERSIONS = {
       b'\xd7!`@\x07',
       b'\xd7!`p\x07',
       b'\xf4!`0\x07',
+    ],
+  },
+  CAR.SUBARU_CROSSTREK_2024: {
+    (Ecu.abs, 0x7b0, None): [
+      b'\xa2 $\x18\x03',
+    ],
+    (Ecu.eps, 0x746, None): [
+      b'*\xd0\x00\n\x03',
+    ],
+    (Ecu.fwdCamera, 0x787, None): [
+      b' \x02\x0e',
+      b'\n!\x08\x036\x04!\x08\x01.',
+    ],
+    (Ecu.engine, 0x7a2, None): [
+      b'\xe8"ap\x07',
+    ],
+    (Ecu.transmission, 0x7a3, None): [
+      b'@\x127cp',
+    ],
+  },
+  CAR.SUBARU_CROSSTREK_2025: {
+    (Ecu.abs, 0x7b0, None): [
+      b'\xa2 $\x15\x05',
+      b'\xa2 $\x17\x06',
+      b'\xa2 $\x18\x05',
+    ],
+    (Ecu.eps, 0x746, None): [
+      b'\xc2 $\x00\x01',
+      b'\xc2 $\x01\x01',
+    ],
+    (Ecu.fwdCamera, 0x787, None): [
+      b' \x02\x0e',
+      b'\x1d!\x08\x00F\x14!\x08\x00=',
+      b'\x1b!\x08\x00D\x11!\x08\x01;',
+    ],
+    (Ecu.engine, 0x7a2, None): [
+      b'\x04"cP\x07',
+      b'\x04"ap\x07',
+      b'\xe8!cp\x07',
     ],
   },
   CAR.SUBARU_FORESTER: {
@@ -569,6 +609,8 @@ FW_VERSIONS = {
     (Ecu.abs, 0x7b0, None): [
       b'\xa1 #\x14\x00',
       b'\xa1 #\x17\x00',
+      b'\xa1 $\x15\x00',
+      b'\xa1 $\x17\x00',        # 2024 Outback
     ],
     (Ecu.eps, 0x746, None): [
       b'+\xc0\x10\x11\x00',
@@ -576,14 +618,19 @@ FW_VERSIONS = {
     ],
     (Ecu.fwdCamera, 0x787, None): [
       b'\t!\x08\x046\x05!\x08\x01/',
+      b'\x1a!\x08\x00C\x00\x00\x00\x00\x00',
+      b'\x1a!\x08\x00C\x0e!\x08\x018',  # 2024 Outback
     ],
     (Ecu.engine, 0x7a2, None): [
       b'\xed,\xa0q\x07',
       b'\xed,\xa2q\x07',
+      b'\x08"`@\x07',
+      b'\xfb,\xa2q\x07',        # 2024 Outback
     ],
     (Ecu.transmission, 0x7a3, None): [
       b'\xa8\x8e\xf41\x00',
       b'\xa8\xfe\xf41\x00',
+      b'\xa9\x17w!r',           # 2024 Outback
     ],
   },
 }

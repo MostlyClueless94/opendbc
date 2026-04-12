@@ -42,6 +42,7 @@ class CarInterface(CarInterfaceBase):
 
     if ret.flags & SubaruFlags.LKAS_ANGLE:
       ret.steerControlType = structs.CarParams.SteerControlType.angle
+      ret.safetyConfigs[0].safetyParam |= SubaruSafetyFlags.LKAS_ANGLE.value
 
     elif candidate == CAR.SUBARU_ASCENT:
       ret.steerActuatorDelay = 0.3  # end-to-end angle controller
@@ -102,7 +103,11 @@ class CarInterface(CarInterfaceBase):
   @staticmethod
   def _get_params_sp(stock_cp: structs.CarParams, ret: structs.CarParamsSP, candidate, fingerprint: dict[int, dict[int, int]],
                      car_fw: list[structs.CarParams.CarFw], alpha_long: bool, is_release_sp: bool, docs: bool) -> structs.CarParamsSP:
-    stock_cp.dashcamOnly = bool(stock_cp.flags & (SubaruFlags.LKAS_ANGLE | SubaruFlags.HYBRID))
+    stock_cp.dashcamOnly = bool((stock_cp.flags & SubaruFlags.HYBRID) or
+                                ((stock_cp.flags & SubaruFlags.LKAS_ANGLE) and is_release_sp and not docs))
+
+    if candidate == CAR.SUBARU_FORESTER_2022:
+      stock_cp.dashcamOnly = True
 
     if not stock_cp.flags & (SubaruFlags.GLOBAL_GEN2 | SubaruFlags.HYBRID):
       stock_cp.autoResumeSng = True

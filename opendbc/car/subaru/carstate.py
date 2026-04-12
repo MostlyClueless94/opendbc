@@ -1,6 +1,9 @@
 import copy
+from cereal import messaging
+from openpilot.common.params import Params
 from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, structs
+from opendbc.car.carlog import carlog
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
 from opendbc.car.subaru.values import DBC, CanBus, SubaruFlags
@@ -8,6 +11,13 @@ from opendbc.car import CanSignalRateCalculator
 
 from opendbc.sunnypilot.car.subaru.mads import MadsCarState
 from opendbc.sunnypilot.car.subaru.stop_and_go import SnGCarState
+
+
+MANUAL_YIELD_TORQUE_THRESHOLD_MIN = 10
+MANUAL_YIELD_TORQUE_THRESHOLD_MAX = 80
+MANUAL_YIELD_TORQUE_THRESHOLD_STEP = 5
+MANUAL_YIELD_TORQUE_THRESHOLD_DEFAULT = 80
+MANUAL_YIELD_TORQUE_THRESHOLD_REFRESH_FRAMES = 100
 
 
 class CarState(CarStateBase, MadsCarState, SnGCarState):
@@ -19,8 +29,64 @@ class CarState(CarStateBase, MadsCarState, SnGCarState):
     self.shifter_values = can_define.dv["Transmission"]["Gear"]
 
     self.angle_rate_calulator = CanSignalRateCalculator(50)
+    self._debug_state = {}
+    self.car_state_bp_msg = None
+    self.params = Params()
+    self.frame = 0
+    self.mc_subaru_manual_yield_torque_threshold_enabled = False
+    self.mc_subaru_manual_yield_torque_threshold = MANUAL_YIELD_TORQUE_THRESHOLD_DEFAULT
+    self._update_params()
+
+  def _log_transition(self, key, value, message):
+    if self._debug_state.get(key) != value:
+      carlog.info(f"subaru[{self.CP.carFingerprint}] {message}")
+      self._debug_state[key] = value
+
+  def _get_int_param(self, key: str, default: int = 0) -> int:
+    value = self.params.get(key, return_default=True)
+    try:
+      return int(value)
+    except (TypeError, ValueError):
+      return default
+
+  def _get_bool_param(self, key: str, default: bool = False) -> bool:
+    value = self.params.get(key, return_default=True)
+    if value is None:
+      return default
+    if isinstance(value, bool):
+      return value
+    if isinstance(value, bytes):
+      return value not in (b"", b"0")
+    if isinstance(value, str):
+      return value not in ("", "0", "false", "False")
+    return bool(value)
+
+  @staticmethod
+  def _clamp_manual_yield_torque_threshold(threshold: int) -> int:
+    clamped = max(MANUAL_YIELD_TORQUE_THRESHOLD_MIN, min(threshold, MANUAL_YIELD_TORQUE_THRESHOLD_MAX))
+    rounded = ((clamped + (MANUAL_YIELD_TORQUE_THRESHOLD_STEP // 2)) // MANUAL_YIELD_TORQUE_THRESHOLD_STEP) * MANUAL_YIELD_TORQUE_THRESHOLD_STEP
+    return max(MANUAL_YIELD_TORQUE_THRESHOLD_MIN, min(rounded, MANUAL_YIELD_TORQUE_THRESHOLD_MAX))
+
+  def _get_stock_manual_yield_torque_threshold(self) -> int:
+    return 75 if self.CP.flags & SubaruFlags.PREGLOBAL else MANUAL_YIELD_TORQUE_THRESHOLD_DEFAULT
+
+  def _get_active_manual_yield_torque_threshold(self) -> int:
+    if not self.mc_subaru_manual_yield_torque_threshold_enabled:
+      return self._get_stock_manual_yield_torque_threshold()
+
+    return self.mc_subaru_manual_yield_torque_threshold
+
+  def _update_params(self) -> None:
+    self.mc_subaru_manual_yield_torque_threshold_enabled = self._get_bool_param("MCSubaruManualYieldTorqueThresholdEnabled")
+    self.mc_subaru_manual_yield_torque_threshold = self._clamp_manual_yield_torque_threshold(
+      self._get_int_param("MCSubaruManualYieldTorqueThreshold", MANUAL_YIELD_TORQUE_THRESHOLD_DEFAULT)
+    )
 
   def update(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:
+    self.frame += 1
+    if self.frame % MANUAL_YIELD_TORQUE_THRESHOLD_REFRESH_FRAMES == 0:
+      self._update_params()
+
     cp = can_parsers[Bus.pt]
     cp_cam = can_parsers[Bus.cam]
     cp_alt = can_parsers[Bus.alt]
@@ -83,20 +149,29 @@ class CarState(CarStateBase, MadsCarState, SnGCarState):
     ret.steeringTorque = cp.vl["Steering_Torque"]["Steer_Torque_Sensor"]
     ret.steeringTorqueEps = cp.vl["Steering_Torque"]["Steer_Torque_Output"]
 
-    steer_threshold = 75 if self.CP.flags & SubaruFlags.PREGLOBAL else 80
-    ret.steeringPressed = abs(ret.steeringTorque) > steer_threshold
+    steer_threshold = self._get_active_manual_yield_torque_threshold()
+    ret.steeringPressed = self.update_steering_pressed(abs(ret.steeringTorque) > steer_threshold, 5)
+    self._log_transition(
+      "manual_yield_torque_threshold",
+      (self.mc_subaru_manual_yield_torque_threshold_enabled, steer_threshold, self.mc_subaru_manual_yield_torque_threshold),
+      f"manual yield torque threshold active={steer_threshold} "
+      + f"customEnabled={self.mc_subaru_manual_yield_torque_threshold_enabled} "
+      + f"stored={self.mc_subaru_manual_yield_torque_threshold} "
+      + f"stock={self._get_stock_manual_yield_torque_threshold()}",
+    )
 
     cp_cruise = cp_alt if self.CP.flags & SubaruFlags.GLOBAL_GEN2 else cp
     cp_es_brake = cp_alt if self.CP.flags & SubaruFlags.GLOBAL_GEN2 else cp_cam
 
-    if self.CP.flags & (SubaruFlags.HYBRID | SubaruFlags.LKAS_ANGLE):
+    if self.CP.flags & SubaruFlags.HYBRID:
       # ES_DashStatus->Cruise_Activated_Dash is likely intended for the dash display only, as it falls
-      # during user gas override and at standstill. ES_Status is missing on hybrid, so we use ES_Brake instead
-
-      # TODO: ES_Brake->Cruise_Activated has been seen staying high when Crosstrek 2025 angle LKAS user pressed
-      #  brake while engaged at a stop. ES_Status and ES_DashStatus->Signal7 correctly fell, but is either missing or
-      #  always zero on hybrids. Probably need to split angle & hybrid. 0x27 and 0x225 on hybrids may work for them.
+      # during user gas override and at standstill. ES_Status is missing/invalid on hybrids, so use ES_Brake instead.
       ret.cruiseState.enabled = cp_es_brake.vl["ES_Brake"]['Cruise_Activated'] != 0
+      ret.cruiseState.available = cp_cam.vl["ES_DashStatus"]['Cruise_On'] != 0
+    elif self.CP.flags & SubaruFlags.LKAS_ANGLE:
+      # On angle-LKAS platforms, ES_Brake->Cruise_Activated can stay high after a brake/disengage event.
+      # ES_Status->Cruise_Activated tracks engagement transitions correctly.
+      ret.cruiseState.enabled = cp_es_brake.vl["ES_Status"]['Cruise_Activated'] != 0
       ret.cruiseState.available = cp_cam.vl["ES_DashStatus"]['Cruise_On'] != 0
     else:
       ret.cruiseState.enabled = cp_cruise.vl["CruiseControl"]["Cruise_Activated"] != 0
@@ -143,10 +218,104 @@ class CarState(CarStateBase, MadsCarState, SnGCarState):
     if self.CP.flags & SubaruFlags.SEND_INFOTAINMENT:
       self.es_infotainment_msg = copy.copy(cp_cam.vl["ES_Infotainment"])
 
+    if self.CP.flags & SubaruFlags.LKAS_ANGLE:
+      self._log_transition("steering_signal_valid", steering_updated,
+                           f"angle Steering_2 valid={steering_updated} angle={ret.steeringAngleDeg:.2f}")
+      self._log_transition("cruise_available", ret.cruiseState.available,
+                           f"ACC available={ret.cruiseState.available} via ES_DashStatus")
+      self._log_transition("cruise_enabled", ret.cruiseState.enabled,
+                           f"ACC enabled={ret.cruiseState.enabled} via ES_Status")
+      self._log_transition("steer_fault_temporary", ret.steerFaultTemporary,
+                           f"steerFaultTemporary={ret.steerFaultTemporary} angle={ret.steeringAngleDeg:.2f} "
+                           + f"rate={ret.steeringRateDeg:.2f} torque={ret.steeringTorque:.2f} "
+                           + f"yieldThreshold={steer_threshold} "
+                           + f"torqueEps={ret.steeringTorqueEps:.2f} cruiseEnabled={ret.cruiseState.enabled} "
+                           + f"cruiseAvailable={ret.cruiseState.available}")
+      self._log_transition("steer_fault_permanent", ret.steerFaultPermanent,
+                           f"steerFaultPermanent={ret.steerFaultPermanent} angle={ret.steeringAngleDeg:.2f} "
+                           + f"rate={ret.steeringRateDeg:.2f} torque={ret.steeringTorque:.2f} "
+                           + f"yieldThreshold={steer_threshold} "
+                           + f"torqueEps={ret.steeringTorqueEps:.2f} cruiseEnabled={ret.cruiseState.enabled} "
+                           + f"cruiseAvailable={ret.cruiseState.available}")
+
+      dash_status_state = (
+        cp_cam.vl["ES_DashStatus"]["Cruise_On"],
+        cp_cam.vl["ES_DashStatus"]["Cruise_State"],
+        cp_cam.vl["ES_DashStatus"]["Conventional_Cruise"],
+      )
+      self._log_transition(
+        "es_dashstatus_state",
+        dash_status_state,
+        "ES_DashStatus "
+        + f"Cruise_On={dash_status_state[0]} Cruise_State={dash_status_state[1]} "
+        + f"Conventional_Cruise={dash_status_state[2]}",
+      )
+
+      if not (self.CP.flags & SubaruFlags.HYBRID):
+        es_status_cruise = cp_es_brake.vl["ES_Status"]["Cruise_Activated"]
+        self._log_transition("es_status_cruise_activated", es_status_cruise,
+                             f"ES_Status Cruise_Activated={es_status_cruise}")
+        self._log_transition("eyesight_fault", eyesight_fault,
+                             f"Eyesight cruise fault={eyesight_fault}")
+
     MadsCarState.update_mads(self, ret, can_parsers)
     SnGCarState.update(self, ret, can_parsers)
+    self.car_state_bp_msg = self.update_car_state_bp(cp, cp_cam, cp_alt)
 
     return ret, ret_sp
+
+  @staticmethod
+  def _read_bool_signal(parser, message: str, signal: str) -> tuple[bool, bool]:
+    try:
+      return True, bool(parser.vl[message][signal])
+    except (KeyError, AttributeError, TypeError):
+      return False, False
+
+  def update_car_state_bp(self, cp, cp_cam, cp_alt):
+    dat = messaging.new_message("carStateBP")
+    dat.valid = True
+
+    brake_light_status = dat.carStateBP.brakeLightStatus
+    brake_light_status.dataAvailable = False
+    brake_light_status.brakeLightsOn = False
+
+    if self.CP.flags & SubaruFlags.PREGLOBAL:
+      return dat
+
+    cp_brakes = cp_alt if self.CP.flags & SubaruFlags.GLOBAL_GEN2 else cp
+    cp_es_brake = cp_alt if self.CP.flags & SubaruFlags.GLOBAL_GEN2 else cp_cam
+
+    driver_brake_candidates = [
+      (cp_cam, "ES_DashStatus", "Brake_Lights"),
+      (cp_es_brake, "ES_Status", "Brake_Lights"),
+      (cp_brakes, "Brake_Pedal", "Brake_Lights"),
+    ]
+    cruise_brake_candidates = [
+      (cp_es_brake, "ES_Brake", "Cruise_Brake_Lights"),
+      (cp_es_brake, "ES_Brake", "Cruise_Brake_Active"),
+    ]
+
+    driver_available = False
+    driver_brake_lights = False
+    for parser, message, signal in driver_brake_candidates:
+      available, value = self._read_bool_signal(parser, message, signal)
+      if available:
+        driver_available = True
+        driver_brake_lights = value
+        break
+
+    cruise_available = False
+    cruise_brake_lights = False
+    for parser, message, signal in cruise_brake_candidates:
+      available, value = self._read_bool_signal(parser, message, signal)
+      if available:
+        cruise_available = True
+        cruise_brake_lights = cruise_brake_lights or value
+
+    brake_light_status.dataAvailable = driver_available or cruise_available
+    brake_light_status.brakeLightsOn = driver_brake_lights or cruise_brake_lights
+
+    return dat
 
   @staticmethod
   def get_can_parsers(CP, CP_SP):

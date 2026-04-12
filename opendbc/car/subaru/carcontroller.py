@@ -1,7 +1,9 @@
 import numpy as np
+from openpilot.common.params import Params
 from opendbc.can import CANPacker
-from opendbc.car import Bus, make_tester_present_msg
-from opendbc.car.lateral import apply_driver_steer_torque_limits, common_fault_avoidance
+from opendbc.car import Bus, make_tester_present_msg, structs
+from opendbc.car.carlog import carlog
+from opendbc.car.lateral import apply_driver_steer_torque_limits, apply_std_steer_angle_limits, common_fault_avoidance
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.subaru import subarucan
 from opendbc.car.subaru.values import DBC, GLOBAL_ES_ADDR, CanBus, CarControllerParams, SubaruFlags
@@ -12,21 +14,403 @@ from opendbc.sunnypilot.car.subaru.stop_and_go import SnGCarController
 # involves the total steering angle change rather than rate, but these limits work well for now
 MAX_STEER_RATE = 25  # deg/s
 MAX_STEER_RATE_FRAMES = 7  # tx control frames needed before torque can be cut
-
-
+MADS_ONLY_MIN_SPEED = 0.44704  # m/s (1 mph)
+MADS_ONLY_MAX_STEER_ANGLE = 120.0  # deg
+ANGLE_DRIVER_OVERRIDE_HOLD_FRAMES = 10  # steering command frames (~200 ms with STEER_STEP=2)
+ANGLE_DRIVER_OVERRIDE_RAMP_FRAMES = 36  # validated default reclaim ramp (steering command frames, ~720 ms with STEER_STEP=2)
+ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_MIN = 0
+ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_MAX = 6
+ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_DEFAULT = 4
+ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_EXPONENTS = [1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 3.5]
+ANGLE_DRIVER_OVERRIDE_RELEASE_GUARD_LEVEL_MIN = 1
+ANGLE_DRIVER_OVERRIDE_RELEASE_GUARD_LEVEL_MAX = 3
+ANGLE_DRIVER_OVERRIDE_RELEASE_GUARD_LEVEL_DEFAULT = 2
+ANGLE_DRIVER_OVERRIDE_RELEASE_GUARD_CONFIRM_FRAME_OPTIONS = [4, 8, 12]  # additional steering command frames (~80/160/240 ms)
+ANGLE_DRIVER_OVERRIDE_RELEASE_GUARD_RATE_THRESHOLDS = [3.0, 2.0, 1.0]  # deg/s
+ANGLE_DRIVER_OVERRIDE_RELEASE_GUARD_ANGLE_DELTA = 1.0  # deg
+# Soft-capture engage blending (SubiPilot 1.1 staging experiment)
+# Maps UI level 0 (off) / 1-5 to (ramp_frames, alpha_start) pairs.
+# Level 5 is the most damped (longest ramp, gentlest start).
+SOFT_CAPTURE_LEVEL_PARAMS = [
+  # (ramp_frames, alpha_start)
+  (0, 1.0),    # 0 - disabled (instant snap, stock behavior)
+  (15, 0.25),  # 1 - light
+  (22, 0.15),  # 2 - mild
+  (30, 0.08),  # 3 - medium
+  (40, 0.05),  # 4 - strong
+  (50, 0.02),  # 5 - max
+]
 class CarController(CarControllerBase, SnGCarController):
   def __init__(self, dbc_names, CP, CP_SP):
     CarControllerBase.__init__(self, dbc_names, CP, CP_SP)
     SnGCarController.__init__(self, CP, CP_SP)
     self.apply_torque_last = 0
+    self.apply_angle_last = 0
 
     self.cruise_button_prev = 0
     self.steer_rate_counter = 0
+    self._debug_state = {}
 
     self.p = CarControllerParams(CP)
     self.packer = CANPacker(DBC[CP.carFingerprint][Bus.pt])
+    self.params = Params()
+    self.mc_subaru_manual_yield_resume_softness_enabled = True
+    self.mc_subaru_manual_yield_resume_softness = ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_DEFAULT
+    self.mc_subaru_manual_yield_release_guard_enabled = False
+    self.mc_subaru_manual_yield_release_guard_level = ANGLE_DRIVER_OVERRIDE_RELEASE_GUARD_LEVEL_DEFAULT
+    self.mc_subaru_soft_capture_enabled = False
+    self.mc_subaru_soft_capture_level = 3
+    self.angle_driver_override_hold_frames = 0
+    self.angle_driver_override_ramp_frames = 0
+    self.angle_driver_override_ramp_total_frames = ANGLE_DRIVER_OVERRIDE_RAMP_FRAMES
+    self.angle_driver_override_ramp_start_angle = 0.0
+    self.angle_driver_override_ramp_softness_exponent = ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_EXPONENTS[ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_DEFAULT]
+    self.angle_driver_override_release_guard_pending = False
+    self.angle_driver_override_release_guard_confirm_frames = 0
+    self.angle_driver_override_release_guard_required_frames = 0
+    self.angle_driver_override_release_guard_reference_angle = 0.0
+    self.angle_driver_override_release_guard_rate_threshold = 0.0
+    self.lat_active_prev = False
+    self.soft_capture_frame = -(SOFT_CAPTURE_LEVEL_PARAMS[-1][0] + 1)
+    self._update_params()
+
+  def _log_transition(self, key, value, message):
+    if self._debug_state.get(key) != value:
+      carlog.info(f"subaru[{self.CP.carFingerprint}] {message}")
+      self._debug_state[key] = value
+
+  def _get_int_param(self, key: str, default: int = 0) -> int:
+    value = self.params.get(key, return_default=True)
+    try:
+      return int(value)
+    except (TypeError, ValueError):
+      return default
+
+  def _get_bool_param(self, key: str, default: bool = False) -> bool:
+    value = self.params.get(key, return_default=True)
+    if value is None:
+      return default
+    if isinstance(value, bool):
+      return value
+    if isinstance(value, bytes):
+      return value not in (b"", b"0")
+    if isinstance(value, str):
+      return value not in ("", "0", "false", "False")
+    return bool(value)
+
+  @staticmethod
+  def _get_resume_softness_exponent(softness_setting: int) -> float:
+    return ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_EXPONENTS[int(np.clip(
+      softness_setting,
+      ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_MIN,
+      ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_MAX,
+    ))]
+
+  @staticmethod
+  def _get_release_guard_confirm_frames(level: int) -> int:
+    idx = int(np.clip(level, ANGLE_DRIVER_OVERRIDE_RELEASE_GUARD_LEVEL_MIN, ANGLE_DRIVER_OVERRIDE_RELEASE_GUARD_LEVEL_MAX)) - 1
+    return ANGLE_DRIVER_OVERRIDE_RELEASE_GUARD_CONFIRM_FRAME_OPTIONS[idx]
+
+  @staticmethod
+  def _get_release_guard_rate_threshold(level: int) -> float:
+    idx = int(np.clip(level, ANGLE_DRIVER_OVERRIDE_RELEASE_GUARD_LEVEL_MIN, ANGLE_DRIVER_OVERRIDE_RELEASE_GUARD_LEVEL_MAX)) - 1
+    return ANGLE_DRIVER_OVERRIDE_RELEASE_GUARD_RATE_THRESHOLDS[idx]
+
+  def _get_soft_capture_level(self) -> int:
+    if not self.mc_subaru_soft_capture_enabled:
+      return 0
+
+    return int(np.clip(
+      self.mc_subaru_soft_capture_level,
+      1,
+      len(SOFT_CAPTURE_LEVEL_PARAMS) - 1,
+    ))
+
+  def _get_soft_capture_angle(self, model_target: float, wheel_angle: float) -> float:
+    level = self._get_soft_capture_level()
+    if level == 0:
+      return model_target
+
+    ramp_frames, alpha_start = SOFT_CAPTURE_LEVEL_PARAMS[level]
+    frames_since_engage = max(0, self.frame - self.soft_capture_frame)
+
+    if frames_since_engage >= ramp_frames:
+      return model_target
+
+    t = frames_since_engage / ramp_frames
+    alpha = float(np.interp(t, [0.0, 1.0], [alpha_start, 1.0]))
+    return wheel_angle + alpha * (model_target - wheel_angle)
+
+  def _update_params(self):
+    self.mc_subaru_manual_yield_resume_softness_enabled = self._get_bool_param("MCSubaruManualYieldResumeSoftnessEnabled", True)
+    manual_yield_resume_softness = int(np.clip(
+      self._get_int_param("MCSubaruManualYieldResumeSoftness", ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_DEFAULT),
+      ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_MIN,
+      ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_MAX,
+    ))
+    self.mc_subaru_manual_yield_resume_softness = manual_yield_resume_softness if self.mc_subaru_manual_yield_resume_softness_enabled \
+      else ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_DEFAULT
+    self.mc_subaru_manual_yield_release_guard_enabled = self._get_bool_param("MCSubaruManualYieldReleaseGuardEnabled")
+    self.mc_subaru_manual_yield_release_guard_level = int(np.clip(
+      self._get_int_param("MCSubaruManualYieldReleaseGuardLevel", ANGLE_DRIVER_OVERRIDE_RELEASE_GUARD_LEVEL_DEFAULT),
+      ANGLE_DRIVER_OVERRIDE_RELEASE_GUARD_LEVEL_MIN,
+      ANGLE_DRIVER_OVERRIDE_RELEASE_GUARD_LEVEL_MAX,
+    ))
+    self.mc_subaru_soft_capture_enabled = self._get_bool_param("MCSubaruSoftCaptureEnabled")
+    self.mc_subaru_soft_capture_level = int(np.clip(
+      self._get_int_param("MCSubaruSoftCaptureLevel", 3),
+      1,
+      len(SOFT_CAPTURE_LEVEL_PARAMS) - 1,
+    ))
+
+  def _reset_angle_driver_override_ramp(self):
+    self.angle_driver_override_ramp_frames = 0
+    self.angle_driver_override_ramp_total_frames = ANGLE_DRIVER_OVERRIDE_RAMP_FRAMES
+    self.angle_driver_override_ramp_start_angle = 0.0
+    self.angle_driver_override_ramp_softness_exponent = ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_EXPONENTS[ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_DEFAULT]
+
+  def _reset_angle_driver_override_release_guard(self):
+    self.angle_driver_override_release_guard_pending = False
+    self.angle_driver_override_release_guard_confirm_frames = 0
+    self.angle_driver_override_release_guard_required_frames = 0
+    self.angle_driver_override_release_guard_reference_angle = 0.0
+    self.angle_driver_override_release_guard_rate_threshold = 0.0
+
+  def _reset_angle_driver_override_state(self):
+    self.angle_driver_override_hold_frames = 0
+    self._reset_angle_driver_override_release_guard()
+    self._reset_angle_driver_override_ramp()
+
+  def _start_angle_driver_override_ramp(self, measured_angle: float):
+    self.angle_driver_override_ramp_frames = ANGLE_DRIVER_OVERRIDE_RAMP_FRAMES
+    self.angle_driver_override_ramp_total_frames = ANGLE_DRIVER_OVERRIDE_RAMP_FRAMES
+    self.angle_driver_override_ramp_start_angle = measured_angle
+    self.angle_driver_override_ramp_softness_exponent = self._get_resume_softness_exponent(
+      self.mc_subaru_manual_yield_resume_softness
+    )
+
+  def _start_angle_driver_override_release_guard(self, measured_angle: float):
+    self.angle_driver_override_release_guard_pending = True
+    self.angle_driver_override_release_guard_confirm_frames = 0
+    self.angle_driver_override_release_guard_required_frames = self._get_release_guard_confirm_frames(
+      self.mc_subaru_manual_yield_release_guard_level
+    )
+    self.angle_driver_override_release_guard_reference_angle = measured_angle
+    self.angle_driver_override_release_guard_rate_threshold = self._get_release_guard_rate_threshold(
+      self.mc_subaru_manual_yield_release_guard_level
+    )
+
+  def _update_angle_driver_override_release_guard(self, measured_angle: float, steering_rate: float) -> bool:
+    if not self.angle_driver_override_release_guard_pending:
+      return False
+
+    within_angle_window = abs(measured_angle - self.angle_driver_override_release_guard_reference_angle) <= \
+      ANGLE_DRIVER_OVERRIDE_RELEASE_GUARD_ANGLE_DELTA
+    within_rate_window = abs(steering_rate) <= self.angle_driver_override_release_guard_rate_threshold
+
+    if within_angle_window and within_rate_window:
+      self.angle_driver_override_release_guard_confirm_frames += 1
+    else:
+      self.angle_driver_override_release_guard_confirm_frames = 0
+      self.angle_driver_override_release_guard_reference_angle = measured_angle
+
+    if self.angle_driver_override_release_guard_confirm_frames >= self.angle_driver_override_release_guard_required_frames:
+      self._reset_angle_driver_override_release_guard()
+      return True
+
+    return False
+
+  def _update_angle_driver_override_state(self, steering_pressed: bool, lkas_allowed: bool,
+                                          measured_angle: float, steering_rate: float) -> tuple[bool, bool]:
+    if not lkas_allowed:
+      self._reset_angle_driver_override_state()
+      return False, False
+
+    if steering_pressed:
+      self.angle_driver_override_hold_frames = ANGLE_DRIVER_OVERRIDE_HOLD_FRAMES
+      self._reset_angle_driver_override_release_guard()
+      self._reset_angle_driver_override_ramp()
+      return True, False
+
+    if self.angle_driver_override_hold_frames > 0:
+      self.angle_driver_override_hold_frames -= 1
+      if self.angle_driver_override_hold_frames == 0:
+        if self.mc_subaru_manual_yield_release_guard_enabled:
+          self._start_angle_driver_override_release_guard(measured_angle)
+          return True, False
+        return True, True
+      return True, False
+
+    if self.angle_driver_override_release_guard_pending:
+      if self._update_angle_driver_override_release_guard(measured_angle, steering_rate):
+        return True, True
+      return True, False
+
+    return False, False
+
+  def _apply_angle_driver_override_ramp(self, live_steer_target: float) -> tuple[float, bool]:
+    if self.angle_driver_override_ramp_frames <= 0:
+      return live_steer_target, False
+
+    progress = (self.angle_driver_override_ramp_total_frames - self.angle_driver_override_ramp_frames + 1) / \
+      self.angle_driver_override_ramp_total_frames
+    eased_progress = progress ** self.angle_driver_override_ramp_softness_exponent
+    ramped_target = self.angle_driver_override_ramp_start_angle + eased_progress * (
+      live_steer_target - self.angle_driver_override_ramp_start_angle
+    )
+
+    self.angle_driver_override_ramp_frames -= 1
+    if self.angle_driver_override_ramp_frames <= 0:
+      self._reset_angle_driver_override_ramp()
+
+    return ramped_target, True
+
+  def _get_angle_lkas_target(self, raw_target: float) -> float:
+    # Keep the angle target stock/raw; tuning experiments live behind explicit toggles.
+    return raw_target
+
+  def handle_angle_lateral(self, CC, CS):
+    lat_active_rising = CC.latActive and not self.lat_active_prev
+    if lat_active_rising:
+      # Re-anchor the first active angle command to the live wheel angle so panda
+      # safety and the controller start from the same measured reference.
+      self.apply_angle_last = CS.out.steeringAngleDeg
+
+    # Angle-LKAS can hard fault during very low-speed MADS lateral-only maneuvers.
+    # Keep MADS behavior above 1 mph, but block sharp parking-lot style steering in lateral-only mode.
+    mads_only = CC.latActive and not CC.enabled
+    mads_only_ok = CS.out.vEgoRaw > MADS_ONLY_MIN_SPEED and abs(CS.out.steeringAngleDeg) < MADS_ONLY_MAX_STEER_ANGLE
+    lkas_allowed = CC.latActive and (CC.enabled or not mads_only or mads_only_ok) and \
+      CS.out.gearShifter == structs.CarState.GearShifter.drive and not CS.out.standstill
+    angle_driver_override, ramp_will_start = self._update_angle_driver_override_state(
+      CS.out.steeringPressed,
+      lkas_allowed,
+      CS.out.steeringAngleDeg,
+      CS.out.steeringRateDeg,
+    )
+    lkas_request = lkas_allowed and not angle_driver_override
+
+    inhibit_reason = "none"
+    if not CC.latActive:
+      inhibit_reason = "lat_inactive"
+    elif angle_driver_override:
+      inhibit_reason = "manual_override"
+    elif CS.out.gearShifter != structs.CarState.GearShifter.drive:
+      inhibit_reason = "gear_not_drive"
+    elif CS.out.standstill:
+      inhibit_reason = "standstill"
+    elif mads_only and not mads_only_ok:
+      inhibit_reason = "mads_below_min_speed" if CS.out.vEgoRaw <= MADS_ONLY_MIN_SPEED else "mads_angle_limit"
+
+    self._log_transition("angle_lkas_inhibit", inhibit_reason, f"angle LKAS inhibit={inhibit_reason}")
+    self._log_transition(
+      "angle_driver_override_hold",
+      self.angle_driver_override_hold_frames > 0,
+      (
+        f"angle driver override hold active={self.angle_driver_override_hold_frames > 0} "
+        + f"frames={self.angle_driver_override_hold_frames} steeringPressed={CS.out.steeringPressed}"
+      ),
+    )
+    self._log_transition(
+      "angle_driver_override_release_guard",
+      self.angle_driver_override_release_guard_pending,
+      (
+        f"angle driver override release guard active={self.angle_driver_override_release_guard_pending} "
+        + f"frames={self.angle_driver_override_release_guard_confirm_frames}/"
+        + f"{self.angle_driver_override_release_guard_required_frames} "
+        + f"referenceAngle={self.angle_driver_override_release_guard_reference_angle:.2f} "
+        + f"rateThreshold={self.angle_driver_override_release_guard_rate_threshold:.2f}"
+      ),
+    )
+
+    steer_target = self._get_angle_lkas_target(CC.actuators.steeringAngleDeg)
+
+    if ramp_will_start:
+      self._start_angle_driver_override_ramp(CS.out.steeringAngleDeg)
+
+    if lkas_request:
+      steer_target, manual_override_ramp_active = self._apply_angle_driver_override_ramp(steer_target)
+    else:
+      manual_override_ramp_active = False
+
+    handoff_active = angle_driver_override or ramp_will_start or manual_override_ramp_active
+    self._log_transition(
+      "angle_lkas_request",
+      lkas_request,
+      (
+        f"angle LKAS request={lkas_request} inhibit={inhibit_reason} target={steer_target:.2f} "
+        + f"lastApplied={self.apply_angle_last:.2f} measuredAngle={CS.out.steeringAngleDeg:.2f} "
+        + f"measuredRate={CS.out.steeringRateDeg:.2f} handoffActive={handoff_active} "
+        + f"rampActive={manual_override_ramp_active} latActive={CC.latActive} enabled={CC.enabled}"
+      ),
+    )
+
+    self._log_transition(
+      "angle_driver_override_ramp",
+      manual_override_ramp_active,
+      (
+        f"angle driver override ramp active={manual_override_ramp_active} "
+        + f"framesRemaining={self.angle_driver_override_ramp_frames} totalFrames={self.angle_driver_override_ramp_total_frames} "
+        + f"softnessExponent={self.angle_driver_override_ramp_softness_exponent:.2f} "
+        + f"start={self.angle_driver_override_ramp_start_angle:.2f} "
+        + f"steerTarget={steer_target:.2f}"
+      ),
+    )
+
+    if lat_active_rising and lkas_request:
+      self.soft_capture_frame = self.frame
+    self.lat_active_prev = CC.latActive
+
+    if lkas_request:
+      steer_target = self._get_soft_capture_angle(steer_target, CS.out.steeringAngleDeg)
+
+    apply_steer = apply_std_steer_angle_limits(
+      steer_target,
+      self.apply_angle_last,
+      CS.out.vEgoRaw,
+      CS.out.steeringAngleDeg,
+      lkas_request,
+      self.p.ANGLE_LIMITS,
+    )
+
+    if not lkas_request:
+      apply_steer = CS.out.steeringAngleDeg
+
+    self.apply_angle_last = apply_steer
+    return subarucan.create_steering_control_angle(self.packer, apply_steer, lkas_request)
+
+  def handle_torque_lateral(self, CC, CS):
+    apply_torque = int(round(CC.actuators.torque * self.p.STEER_MAX))
+
+    new_torque = int(round(apply_torque))
+    apply_torque = apply_driver_steer_torque_limits(new_torque, self.apply_torque_last, CS.out.steeringTorque, self.p)
+
+    if not CC.latActive:
+      apply_torque = 0
+
+    if self.CP.flags & SubaruFlags.PREGLOBAL:
+      msg = subarucan.create_preglobal_steering_control(self.packer, self.frame // self.p.STEER_STEP, apply_torque, CC.latActive)
+    else:
+      apply_steer_req = CC.latActive
+
+      if self.CP.flags & SubaruFlags.STEER_RATE_LIMITED:
+        # Steering rate fault prevention
+        self.steer_rate_counter, apply_steer_req = common_fault_avoidance(
+          abs(CS.out.steeringRateDeg) > MAX_STEER_RATE,
+          apply_steer_req,
+          self.steer_rate_counter,
+          MAX_STEER_RATE_FRAMES,
+        )
+
+      msg = subarucan.create_steering_control(self.packer, apply_torque, apply_steer_req)
+
+    self.apply_torque_last = apply_torque
+    return msg
 
   def update(self, CC, CC_SP, CS, now_nanos):
+    if self.frame % 100 == 0:
+      self._update_params()
+
     actuators = CC.actuators
     hud_control = CC.hudControl
     pcm_cancel_cmd = CC.cruiseControl.cancel
@@ -35,30 +419,10 @@ class CarController(CarControllerBase, SnGCarController):
 
     # *** steering ***
     if (self.frame % self.p.STEER_STEP) == 0:
-      apply_torque = int(round(actuators.torque * self.p.STEER_MAX))
-
-      # limits due to driver torque
-
-      new_torque = int(round(apply_torque))
-      apply_torque = apply_driver_steer_torque_limits(new_torque, self.apply_torque_last, CS.out.steeringTorque, self.p)
-
-      if not CC.latActive:
-        apply_torque = 0
-
-      if self.CP.flags & SubaruFlags.PREGLOBAL:
-        can_sends.append(subarucan.create_preglobal_steering_control(self.packer, self.frame // self.p.STEER_STEP, apply_torque, CC.latActive))
+      if self.CP.flags & SubaruFlags.LKAS_ANGLE:
+        can_sends.append(self.handle_angle_lateral(CC, CS))
       else:
-        apply_steer_req = CC.latActive
-
-        if self.CP.flags & SubaruFlags.STEER_RATE_LIMITED:
-          # Steering rate fault prevention
-          self.steer_rate_counter, apply_steer_req = \
-            common_fault_avoidance(abs(CS.out.steeringRateDeg) > MAX_STEER_RATE, apply_steer_req,
-                                   self.steer_rate_counter, MAX_STEER_RATE_FRAMES)
-
-        can_sends.append(subarucan.create_steering_control(self.packer, apply_torque, apply_steer_req))
-
-      self.apply_torque_last = apply_torque
+        can_sends.append(self.handle_torque_lateral(CC, CS))
 
     # *** longitudinal ***
 
@@ -142,6 +506,7 @@ class CarController(CarControllerBase, SnGCarController):
     can_sends.extend(SnGCarController.create_stop_and_go(self, self.packer, CC, CS, self.frame))
 
     new_actuators = actuators.as_builder()
+    new_actuators.steeringAngleDeg = self.apply_angle_last
     new_actuators.torque = self.apply_torque_last / self.p.STEER_MAX
     new_actuators.torqueOutputCan = self.apply_torque_last
 
