@@ -33,6 +33,10 @@ class TestCarList(unittest.TestCase):
         "platform": "SUBARU_CROSSTREK_2025",
         "year": ["2025"],
       },
+      "Subaru Forester 2022-24": {
+        "platform": "SUBARU_FORESTER_2022",
+        "year": ["2022", "2023", "2024"],
+      },
     }
 
     for name, attrs in expected.items():
@@ -42,12 +46,6 @@ class TestCarList(unittest.TestCase):
       assert car_list[name]["platform"] == attrs["platform"]
       assert car_list[name]["year"] == attrs["year"]
       assert car_list[name]["package"] == "All"
-
-  def test_dashcam_only_forester_2022_24_stays_hidden(self):
-    with open(CAR_LIST_JSON_OUT) as f:
-      car_list = json.load(f)
-
-    assert "Subaru Forester 2022-24" not in car_list
 
   def test_wiki_only_subaru_rows_stay_hidden_until_data_backed(self):
     with open(CAR_LIST_JSON_OUT) as f:

@@ -3020,6 +3020,18 @@
     ],
     "package": "All"
   },
+  "Subaru Forester 2022-24": {
+    "platform": "SUBARU_FORESTER_2022",
+    "make": "Subaru",
+    "brand": "subaru",
+    "model": "Forester",
+    "year": [
+      "2022",
+      "2023",
+      "2024"
+    ],
+    "package": "All"
+  },
   "Subaru Impreza 2017-19": {
     "platform": "SUBARU_IMPREZA",
     "make": "Subaru",

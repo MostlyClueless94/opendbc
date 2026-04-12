@@ -19,6 +19,8 @@ class CarInterface(CarInterfaceBase):
     # - to find the Cruise_Activated bit from the car
     # - proper panda safety setup (use the correct cruise_activated bit, throttle from Throttle_Hybrid, etc)
     ret.dashcamOnly = bool(ret.flags & (SubaruFlags.PREGLOBAL | SubaruFlags.LKAS_ANGLE | SubaruFlags.HYBRID))
+    if candidate == CAR.SUBARU_FORESTER_2022:
+      ret.dashcamOnly = False
     ret.autoResumeSng = False
 
     # Detect infotainment message sent from the camera
@@ -110,7 +112,7 @@ class CarInterface(CarInterfaceBase):
                                 ((stock_cp.flags & SubaruFlags.LKAS_ANGLE) and is_release_sp and not docs))
 
     if candidate == CAR.SUBARU_FORESTER_2022:
-      stock_cp.dashcamOnly = True
+      stock_cp.dashcamOnly = False
 
     if not stock_cp.flags & (SubaruFlags.GLOBAL_GEN2 | SubaruFlags.HYBRID):
       stock_cp.autoResumeSng = True

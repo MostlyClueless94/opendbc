@@ -89,6 +89,20 @@ class TestSubaruOutbackLongitudinalExperiment:
       assert not (cp.flags & SubaruFlags.DISABLE_EYESIGHT)
       assert not (cp.safetyConfigs[0].safetyParam & SubaruSafetyFlags.LONG)
 
+  def test_forester_2022_24_is_supported_angle_lkas(self):
+    cp = self._params(CAR.SUBARU_FORESTER_2022)
+
+    assert cp.flags & SubaruFlags.LKAS_ANGLE
+    assert not cp.dashcamOnly
+    assert not cp.alphaLongitudinalAvailable
+    assert not cp.openpilotLongitudinalControl
+
+  def test_forester_2022_24_stays_supported_for_docs_path(self):
+    cp = self._params(CAR.SUBARU_FORESTER_2022, alpha_long=True, is_release=True, docs=True)
+    CarInterface.get_params_sp(cp, CAR.SUBARU_FORESTER_2022, gen_empty_fingerprint(), [], True, True, True)
+
+    assert not cp.dashcamOnly
+
   def test_other_lkas_angle_subarus_with_params_remain_blocked(self):
     for candidate in (
       CAR.SUBARU_FORESTER_2022,
