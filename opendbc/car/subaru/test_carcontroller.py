@@ -549,6 +549,12 @@ class TestSubaruCarController(unittest.TestCase):
     self.assertIn("ret.steeringPressed = abs(ret.steeringTorque) > steer_threshold", update_source)
     self.assertNotIn("update_steering_pressed", update_source)
 
+  def test_lkas_hud_state_uses_lateral_active_not_full_openpilot_enabled(self):
+    update_source = inspect.getsource(CarController.update)
+
+    self.assertIn("create_es_lkas_state(self.packer, self.frame // 10, CS.es_lkas_state_msg, CC.latActive", update_source)
+    self.assertNotIn("create_es_lkas_state(self.packer, self.frame // 10, CS.es_lkas_state_msg, CC.enabled", update_source)
+
   def test_mads_only_below_one_mph_still_inhibits_angle_lkas(self):
     controller = self._build_controller()
     cs = self._build_cs(0.22352, 10.0)

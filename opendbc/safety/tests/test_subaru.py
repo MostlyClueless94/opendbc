@@ -122,14 +122,16 @@ class TestSubaruSafetyBase(common.CarSafetyTest):
             self.assertEqual(enable_mads and mads_button_press == 1,
                              self.safety.get_controls_allowed_lat())
 
-  def test_stock_lkas_active_then_off_does_not_enable_mads(self):
+  def test_stock_lkas_active_then_ready_enables_mads_once(self):
     self.safety.set_mads_params(True, False, False)
 
     self._rx(self._lkas_button_msg(False, 2))
     self.assertFalse(self.safety.get_controls_allowed_lat())
 
     self._rx(self._lkas_button_msg(False, 1))
-    self.assertFalse(self.safety.get_controls_allowed_lat())
+    self.assertTrue(self.safety.get_controls_allowed_lat())
+
+    self.safety.set_controls_allowed_lat(False)
 
     self._rx(self._lkas_button_msg(False, 0))
     self.assertFalse(self.safety.get_controls_allowed_lat())

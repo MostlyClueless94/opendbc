@@ -23,9 +23,17 @@ def test_stock_lkas_active_states_do_not_create_mads_button_events():
       assert _lkas_events(stock_state, previous_state) == []
 
 
-def test_stock_lkas_active_to_ready_does_not_create_mads_button_event():
+def test_stock_lkas_active_to_ready_creates_subipilot_mads_button_event():
   for stock_state in SUBARU_STOCK_LKAS_ACTIVE_STATES:
-    assert _lkas_events(SUBARU_MADS_LKAS_BUTTON_STATE, stock_state) == []
+    events = _lkas_events(SUBARU_MADS_LKAS_BUTTON_STATE, stock_state)
+
+    assert len(events) == 1
+    assert events[0].pressed
+    assert events[0].type == ButtonType.lkas
+
+
+def test_repeated_lkas_ready_state_does_not_create_mads_button_event():
+  assert _lkas_events(SUBARU_MADS_LKAS_BUTTON_STATE, SUBARU_MADS_LKAS_BUTTON_STATE) == []
 
 
 def test_lkas_state_release_does_not_create_unknown_button_events():

@@ -26,8 +26,8 @@ class MadsCarState(MadsCarStateBase):
                                 buttons_dict: dict[int, structs.CarState.ButtonEvent.Type]) -> list[structs.CarState.ButtonEvent]:
     events: list[structs.CarState.ButtonEvent] = []
 
-    # State 2 is stock LKAS active. Ignore it so stock LKAS can be turned off without cycling MADS.
-    if cur_btn == prev_btn or cur_btn != SUBARU_MADS_LKAS_BUTTON_STATE or prev_btn in SUBARU_STOCK_LKAS_ACTIVE_STATES:
+    # Only the ready/button state is a SubiPilot LKAS button event. Stock LKAS active states are ignored.
+    if cur_btn == prev_btn or cur_btn != SUBARU_MADS_LKAS_BUTTON_STATE:
       return events
 
     events.append(structs.CarState.ButtonEvent(pressed=True,
