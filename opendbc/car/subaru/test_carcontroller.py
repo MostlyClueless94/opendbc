@@ -17,7 +17,7 @@ from opendbc.car.subaru.carcontroller import (
   MADS_ONLY_MIN_SPEED,
   SOFT_CAPTURE_LEVEL_PARAMS,
 )
-from opendbc.car.subaru.carstate import CarState, MANUAL_YIELD_TORQUE_THRESHOLD_DEFAULT
+from opendbc.car.subaru.carstate import CarState, MANUAL_YIELD_TORQUE_THRESHOLD_DEFAULT, MANUAL_YIELD_TORQUE_THRESHOLD_MIN
 from opendbc.car.subaru.interface import CarInterface
 from opendbc.car.subaru.values import CAR
 from opendbc.car.tests.routes import routes
@@ -536,10 +536,12 @@ class TestSubaruCarController(unittest.TestCase):
 
   def test_manual_yield_torque_threshold_only_changes_when_enabled(self):
     disabled = self._build_carstate(torque_threshold_enabled=False, torque_threshold=10)
-    enabled = self._build_carstate(torque_threshold_enabled=True, torque_threshold=10)
+    clamped = self._build_carstate(torque_threshold_enabled=True, torque_threshold=10)
+    floor = self._build_carstate(torque_threshold_enabled=True, torque_threshold=MANUAL_YIELD_TORQUE_THRESHOLD_MIN)
 
     self.assertEqual(disabled._get_active_manual_yield_torque_threshold(), MANUAL_YIELD_TORQUE_THRESHOLD_DEFAULT)
-    self.assertEqual(enabled._get_active_manual_yield_torque_threshold(), 10)
+    self.assertEqual(clamped._get_active_manual_yield_torque_threshold(), MANUAL_YIELD_TORQUE_THRESHOLD_MIN)
+    self.assertEqual(floor._get_active_manual_yield_torque_threshold(), MANUAL_YIELD_TORQUE_THRESHOLD_MIN)
 
   def test_manual_yield_torque_threshold_update_uses_direct_jacob_threshold_without_hysteresis(self):
     update_source = inspect.getsource(CarState.update)

@@ -12,7 +12,7 @@ from opendbc.sunnypilot.car.subaru.mads import MadsCarState
 from opendbc.sunnypilot.car.subaru.stop_and_go import SnGCarState
 
 
-MANUAL_YIELD_TORQUE_THRESHOLD_MIN = 10
+MANUAL_YIELD_TORQUE_THRESHOLD_MIN = 40
 MANUAL_YIELD_TORQUE_THRESHOLD_MAX = 80
 MANUAL_YIELD_TORQUE_THRESHOLD_STEP = 5
 MANUAL_YIELD_TORQUE_THRESHOLD_DEFAULT = 80
