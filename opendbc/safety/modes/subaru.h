@@ -92,6 +92,7 @@
 static bool subaru_gen2 = false;
 static bool subaru_longitudinal = false;
 static bool subaru_lkas_angle = false;
+static int subaru_lkas_hud_prev = 0;
 
 static uint32_t subaru_get_checksum(const CANPacket_t *msg) {
   return (uint8_t)msg->data[0];
@@ -129,9 +130,13 @@ static void subaru_rx_hook(const CANPacket_t *msg) {
 
   if ((msg->addr == MSG_SUBARU_ES_LKAS_State) && (msg->bus == SUBARU_CAM_BUS)) {
     int lkas_hud = (msg->data[2] & 0x0CU) >> 2U;
-    if ((lkas_hud >= 1) && (lkas_hud <= 3)) {
+    // State 2 is stock LKAS active. Ignore it so stock LKAS can be turned off without cycling MADS.
+    if ((lkas_hud == 1) && (subaru_lkas_hud_prev != 2) && (subaru_lkas_hud_prev != 3)) {
       mads_button_press = MADS_BUTTON_PRESSED;
+    } else {
+      mads_button_press = MADS_BUTTON_NOT_PRESSED;
     }
+    subaru_lkas_hud_prev = lkas_hud;
   }
 
   if (subaru_lkas_angle) {
@@ -320,6 +325,7 @@ static safety_config subaru_init(uint16_t param) {
 
   subaru_gen2 = GET_FLAG(param, SUBARU_PARAM_GEN2);
   subaru_lkas_angle = GET_FLAG(param, SUBARU_PARAM_LKAS_ANGLE);
+  subaru_lkas_hud_prev = 0;
 
   subaru_common_init();
 

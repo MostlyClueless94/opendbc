@@ -13,6 +13,8 @@ from opendbc.sunnypilot.mads_base import MadsCarStateBase
 from opendbc.can.parser import CANParser
 
 ButtonType = structs.CarState.ButtonEvent.Type
+SUBARU_MADS_LKAS_BUTTON_STATE = 1
+SUBARU_STOCK_LKAS_ACTIVE_STATES = (2, 3)
 
 
 class MadsCarState(MadsCarStateBase):
@@ -24,18 +26,12 @@ class MadsCarState(MadsCarStateBase):
                                 buttons_dict: dict[int, structs.CarState.ButtonEvent.Type]) -> list[structs.CarState.ButtonEvent]:
     events: list[structs.CarState.ButtonEvent] = []
 
-    if cur_btn == prev_btn:
+    # State 2 is stock LKAS active. Ignore it so stock LKAS can be turned off without cycling MADS.
+    if cur_btn == prev_btn or cur_btn != SUBARU_MADS_LKAS_BUTTON_STATE or prev_btn in SUBARU_STOCK_LKAS_ACTIVE_STATES:
       return events
 
-    state_changes = [
-      {"pressed": prev_btn != cur_btn and cur_btn != 2 and not (prev_btn == 2 and cur_btn == 1)},
-      {"pressed": prev_btn != cur_btn and cur_btn == 2 and cur_btn != 1},
-    ]
-
-    for change in state_changes:
-      if change["pressed"]:
-        events.append(structs.CarState.ButtonEvent(pressed=change["pressed"],
-                                                   type=buttons_dict.get(cur_btn, ButtonType.unknown)))
+    events.append(structs.CarState.ButtonEvent(pressed=True,
+                                               type=buttons_dict.get(cur_btn, ButtonType.unknown)))
     return events
 
   def update_mads(self, ret: structs.CarState, can_parsers: dict[StrEnum, CANParser]) -> None:
