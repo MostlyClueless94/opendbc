@@ -54,7 +54,7 @@ class CarController(CarControllerBase, SnGCarController):
     self.p = CarControllerParams(CP)
     self.packer = CANPacker(DBC[CP.carFingerprint][Bus.pt])
     self.params = Params()
-    self.mc_subaru_manual_yield_resume_softness_enabled = True
+    self.mc_subaru_manual_yield_resume_softness_enabled = False
     self.mc_subaru_manual_yield_resume_softness = ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_DEFAULT
     self.mc_subaru_manual_yield_release_guard_enabled = False
     self.mc_subaru_manual_yield_release_guard_level = ANGLE_DRIVER_OVERRIDE_RELEASE_GUARD_LEVEL_DEFAULT
@@ -116,6 +116,9 @@ class CarController(CarControllerBase, SnGCarController):
     idx = int(np.clip(level, ANGLE_DRIVER_OVERRIDE_RELEASE_GUARD_LEVEL_MIN, ANGLE_DRIVER_OVERRIDE_RELEASE_GUARD_LEVEL_MAX)) - 1
     return ANGLE_DRIVER_OVERRIDE_RELEASE_GUARD_RATE_THRESHOLDS[idx]
 
+  def _manual_yield_handoff_enabled(self) -> bool:
+    return self.mc_subaru_manual_yield_resume_softness_enabled or self.mc_subaru_manual_yield_release_guard_enabled
+
   def _get_soft_capture_level(self) -> int:
     if not self.mc_subaru_soft_capture_enabled:
       return 0
@@ -142,7 +145,7 @@ class CarController(CarControllerBase, SnGCarController):
     return wheel_angle + alpha * (model_target - wheel_angle)
 
   def _update_params(self):
-    self.mc_subaru_manual_yield_resume_softness_enabled = self._get_bool_param("MCSubaruManualYieldResumeSoftnessEnabled", True)
+    self.mc_subaru_manual_yield_resume_softness_enabled = self._get_bool_param("MCSubaruManualYieldResumeSoftnessEnabled")
     manual_yield_resume_softness = int(np.clip(
       self._get_int_param("MCSubaruManualYieldResumeSoftness", ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_DEFAULT),
       ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_MIN,
@@ -222,7 +225,7 @@ class CarController(CarControllerBase, SnGCarController):
 
   def _update_angle_driver_override_state(self, steering_pressed: bool, lkas_allowed: bool,
                                           measured_angle: float, steering_rate: float) -> tuple[bool, bool]:
-    if not lkas_allowed:
+    if not lkas_allowed or not self._manual_yield_handoff_enabled():
       self._reset_angle_driver_override_state()
       return False, False
 
@@ -238,12 +241,16 @@ class CarController(CarControllerBase, SnGCarController):
         if self.mc_subaru_manual_yield_release_guard_enabled:
           self._start_angle_driver_override_release_guard(measured_angle)
           return True, False
-        return True, True
+        if self.mc_subaru_manual_yield_resume_softness_enabled:
+          return True, True
+        return False, False
       return True, False
 
     if self.angle_driver_override_release_guard_pending:
       if self._update_angle_driver_override_release_guard(measured_angle, steering_rate):
-        return True, True
+        if self.mc_subaru_manual_yield_resume_softness_enabled:
+          return True, True
+        return False, False
       return True, False
 
     return False, False
