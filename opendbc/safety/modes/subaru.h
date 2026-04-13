@@ -92,6 +92,14 @@
 static bool subaru_gen2 = false;
 static bool subaru_longitudinal = false;
 static bool subaru_lkas_angle = false;
+static int subaru_lkas_dash_state_prev = 0;
+
+static bool subaru_lkas_dash_state_is_button_press(const int current, const int previous) {
+  const bool ready_toggle = ((current == 0) && (previous == 1)) || ((current == 1) && (previous == 0));
+  const bool previous_stock_active = (previous == 2) || (previous == 3);
+  const bool stock_lkas_cleared = previous_stock_active && ((current == 0) || (current == 1));
+  return (current != previous) && (ready_toggle || stock_lkas_cleared);
+}
 
 static uint32_t subaru_get_checksum(const CANPacket_t *msg) {
   return (uint8_t)msg->data[0];
@@ -129,7 +137,9 @@ static void subaru_rx_hook(const CANPacket_t *msg) {
 
   if ((msg->addr == MSG_SUBARU_ES_LKAS_State) && (msg->bus == SUBARU_CAM_BUS)) {
     int lkas_hud = (msg->data[2] & 0x0CU) >> 2U;
-    mads_button_press = (lkas_hud == 1) ? MADS_BUTTON_PRESSED : MADS_BUTTON_NOT_PRESSED;
+    mads_button_press = subaru_lkas_dash_state_is_button_press(lkas_hud, subaru_lkas_dash_state_prev) ? \
+                         MADS_BUTTON_PRESSED : MADS_BUTTON_NOT_PRESSED;
+    subaru_lkas_dash_state_prev = lkas_hud;
   }
 
   if (subaru_lkas_angle) {
@@ -318,6 +328,7 @@ static safety_config subaru_init(uint16_t param) {
 
   subaru_gen2 = GET_FLAG(param, SUBARU_PARAM_GEN2);
   subaru_lkas_angle = GET_FLAG(param, SUBARU_PARAM_LKAS_ANGLE);
+  subaru_lkas_dash_state_prev = 0;
   subaru_common_init();
 
 #ifdef ALLOW_DEBUG

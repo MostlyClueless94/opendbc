@@ -107,34 +107,56 @@ class TestSubaruSafetyBase(common.CarSafetyTest):
     values = {"Cruise_Activated": enable}
     return self.packer.make_can_msg_safety("CruiseControl", self.ALT_MAIN_BUS, values)
 
-  def _lkas_button_msg(self, lkas_pressed=False, lkas_hud=0):
-    values = {"LKAS_Dash_State": 1 if lkas_pressed else lkas_hud}
+  def _lkas_button_msg(self, lkas_hud=0):
+    values = {"LKAS_Dash_State": lkas_hud}
     return self.packer.make_can_msg_safety("ES_LKAS_State", SUBARU_CAM_BUS, values)
 
+  def _reset_subaru_safety(self):
+    self.safety.set_safety_hooks(CarParams.SafetyModel.subaru, self.FLAGS)
+    self.safety.init_tests()
+
+  def _prime_lkas_dash_state(self, state):
+    self._rx(self._lkas_button_msg(state))
+    if state == 1:
+      self._rx(self._lkas_button_msg(state))
+    self.safety.set_controls_allowed_lat(False)
+    self.assertEqual(0, self.safety.get_mads_button_press())
+
   def test_enable_control_allowed_with_mads_button(self):
+    valid_transitions = ((0, 1), (1, 0), (2, 0), (2, 1), (3, 0), (3, 1))
     for enable_mads in (True, False):
-      with self.subTest("enable_mads", mads_enabled=enable_mads):
-        for mads_button_press in range(4):
-          with self.subTest("mads_button_press", button_state=mads_button_press):
-            self.safety.set_mads_params(enable_mads, False, False)
+      for previous_state, current_state in valid_transitions:
+        with self.subTest(enable_mads=enable_mads, previous_state=previous_state, current_state=current_state):
+          self._reset_subaru_safety()
+          self.safety.set_mads_params(enable_mads, False, False)
 
-            self._rx(self._lkas_button_msg(False, mads_button_press))
-            self.assertEqual(enable_mads and mads_button_press == 1,
-                             self.safety.get_controls_allowed_lat())
+          self._prime_lkas_dash_state(previous_state)
 
-  def test_stock_lkas_active_then_ready_enables_mads_once(self):
+          self._rx(self._lkas_button_msg(current_state))
+          self.assertEqual(1, self.safety.get_mads_button_press())
+          self.assertEqual(enable_mads, self.safety.get_controls_allowed_lat())
+
+  def test_lkas_dash_state_transitions_that_are_not_button_pulses_do_not_enable_mads(self):
+    ignored_transitions = ((0, 0), (1, 1), (2, 2), (3, 3), (1, 2), (1, 3))
+    for previous_state, current_state in ignored_transitions:
+      with self.subTest(previous_state=previous_state, current_state=current_state):
+        self._reset_subaru_safety()
+        self.safety.set_mads_params(True, False, False)
+
+        self._prime_lkas_dash_state(previous_state)
+
+        self._rx(self._lkas_button_msg(current_state))
+        self.assertEqual(0, self.safety.get_mads_button_press())
+        self.assertFalse(self.safety.get_controls_allowed_lat())
+
+  def test_lkas_dash_state_button_pulse_resets_after_repeated_state(self):
     self.safety.set_mads_params(True, False, False)
 
-    self._rx(self._lkas_button_msg(False, 2))
-    self.assertFalse(self.safety.get_controls_allowed_lat())
+    self._rx(self._lkas_button_msg(1))
+    self.assertEqual(1, self.safety.get_mads_button_press())
 
-    self._rx(self._lkas_button_msg(False, 1))
-    self.assertTrue(self.safety.get_controls_allowed_lat())
-
-    self.safety.set_controls_allowed_lat(False)
-
-    self._rx(self._lkas_button_msg(False, 0))
-    self.assertFalse(self.safety.get_controls_allowed_lat())
+    self._rx(self._lkas_button_msg(1))
+    self.assertEqual(0, self.safety.get_mads_button_press())
 
 
 class TestSubaruStockLongitudinalSafetyBase(TestSubaruSafetyBase):
